@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# metal-cpp
+ext/metal-cpp/
+!ext-metal-cpp/.gitkeep

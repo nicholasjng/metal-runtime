@@ -1,0 +1,13 @@
+[project]
+name = "metal-runtime"
+version = "0.1.0"
+description = "Python bindings for Apple Metal."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+zed = [
+    "ruff>=0.15.12",
+    "ty>=0.0.34",
+]
