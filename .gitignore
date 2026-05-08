@@ -9,6 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-# metal-cpp
+# metal-cpp now comes from CMake (FetchContent) into build/, already ignored
+# above. ext/metal-cpp/ is the legacy download path — ignored, safe to delete.
 ext/metal-cpp/
-!ext-metal-cpp/.gitkeep
