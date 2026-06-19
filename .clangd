@@ -12,3 +12,9 @@ Diagnostics:
 
 Index:
   Background: Build
+
+---
+If:
+  PathMatch: .*\.metal
+Diagnostics:
+  Suppress: '*'
