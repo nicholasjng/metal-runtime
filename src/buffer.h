@@ -6,9 +6,8 @@ class Device;
 class Buffer;
 }  // namespace MTL
 
-// Wraps an MTL::Buffer allocated with ResourceStorageModeShared: on Apple Silicon's
-// unified memory, host and GPU read/write the same bytes, so contents() is a plain
-// host pointer -- no explicit upload/readback copy once allocated.
+// ResourceStorageModeShared: unified memory means host and GPU read/write the
+// same bytes, so contents() is a plain pointer, no upload/readback copy needed.
 class Buffer {
    public:
     Buffer(MTL::Device* device, size_t size_bytes);

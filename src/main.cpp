@@ -1,12 +1,8 @@
-// Minimal metal-cpp smoke test: print the system default GPU.
-//
-// This is the seed the runtime grows from (device/queue/buffers/MSL library
-// cache + nanobind bindings — see ROADMAP.md). For now it just proves the
-// metal-cpp fetch and the Objective-C bridge are wired up:
+// Prints the system default GPU: proves the metal-cpp fetch and Objective-C
+// bridge work.
 //
 //   cmake -S . -B build -G Ninja && cmake --build build
 //   ./build/metal_probe   ->   Metal device: Apple M1 Pro
-//
 #include <cstdio>
 
 #include "metal.h"

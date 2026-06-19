@@ -20,8 +20,8 @@ class MetalRuntime {
     MTL::Device* device() const { return device_; }
     MTL::CommandQueue* queue() const { return queue_; }
 
-    // Returns a cached Library for `msl_source`, compiling it on first use so
-    // repeated dispatch of an already-seen generated kernel doesn't recompile.
+    // Cached by source string: repeated dispatch of an already-seen kernel
+    // skips recompilation.
     Library& library_for(const std::string& msl_source);
 
    private:

@@ -29,8 +29,8 @@ size_t element_count(const std::vector<size_t>& shape) {
     return count;
 }
 
-// Owns an MTL::Buffer (ResourceStorageModeShared) plus the shape it was created
-// with, so `.numpy()` can hand back a view shaped like the original array.
+// Tracks the shape from construction so to_numpy() can hand back a view
+// shaped like the original array.
 class PyBuffer {
    public:
     explicit PyBuffer(nb::ndarray<float, nb::c_contig> array)
@@ -39,18 +39,16 @@ class PyBuffer {
         std::memcpy(buffer_->contents(), array.data(), array.size() * sizeof(float));
     }
 
-    // Output-only allocation, no upload -- for kernels (like a Pallas rollout's
-    // `out_ref`) that write every element themselves instead of transforming
-    // existing host data. Zero-initialized rather than left uninitialized: cheap
-    // relative to the upload path this replaces, and rules out reading back
-    // garbage from a kernel bug that doesn't cover every element.
+    // No upload: for kernels that write every output element themselves (a
+    // Pallas rollout's out_ref). Zero-initialized rather than left
+    // uninitialized, cheap next to the upload path it replaces, and it rules
+    // out reading back garbage from a kernel that misses an element.
     static PyBuffer zeros(std::vector<size_t> shape) { return PyBuffer(std::move(shape)); }
 
-    // Zero-copy view of the shared buffer; `owner` ties the NumPy array's lifetime
-    // to this PyBuffer instance so it can't outlive the memory it points into.
-    // Named `to_numpy` rather than `numpy` -- a same-named method shadows the
-    // `numpy` module inside the generated .pyi stub's own class scope, which type
-    // checkers resolve statically (unlike CPython's sequential class-body exec).
+    // `owner` ties the returned array's lifetime to this PyBuffer so it can't
+    // outlive the memory it views. Named to_numpy, not numpy: a same-named
+    // method shadows the numpy module in the generated .pyi stub's own class
+    // scope, since type checkers resolve names statically.
     nb::ndarray<nb::numpy, float> to_numpy() {
         return nb::ndarray<nb::numpy, float>(static_cast<float*>(buffer_->contents()),
                                              shape_.size(), shape_.data(), nb::find(*this));
@@ -70,7 +68,6 @@ class PyBuffer {
     std::unique_ptr<Buffer> buffer_;
 };
 
-// Owns a ComputePipeline for one named function in a (cached) Library.
 class PyKernel {
    public:
     PyKernel(const std::string& msl_source, const std::string& function_name)
@@ -93,9 +90,8 @@ void run(PyKernel& kernel, size_t grid_size, size_t threadgroup_size,
 }  // namespace
 
 NB_MODULE(_core, m) {
-    // Registration lives in the constructor's side effect; the temporary itself
-    // is never meant to be kept alive, unlike the lock-guard-style bug this
-    // check exists for.
+    // The constructor's side effect is the registration; the temporary isn't
+    // meant to be kept, unlike the lock-guard bug this check targets.
     nb::exception<MSLCompileError>(m, "CompileError");  // NOLINT(bugprone-unused-raii)
 
     m.def("device_name", &device_name);

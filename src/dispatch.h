@@ -12,7 +12,6 @@ class CommandQueue;
 class ComputePipelineState;
 }  // namespace MTL
 
-// Wraps an MTL::ComputePipelineState built from a named function in a Library.
 class ComputePipeline {
    public:
     ComputePipeline(MTL::Device* device, const Library& library, const std::string& function_name);
@@ -27,9 +26,8 @@ class ComputePipeline {
     MTL::ComputePipelineState* pipeline_ = nullptr;
 };
 
-// Dispatches `pipeline` over a 1D grid of `grid_size` threads (grouped in
-// `threadgroup_size`-sized threadgroups, clamped to the pipeline's own max),
-// binding `buffers` at sequential buffer indices [0, buffers.size()). Blocks
-// until the GPU finishes.
+// 1D grid of `grid_size` threads, `threadgroup_size` clamped to the pipeline's
+// own max. `buffers` bind at sequential indices starting from 0. Blocks until
+// the GPU finishes.
 void dispatch(MTL::CommandQueue* queue, ComputePipeline& pipeline,
               const std::vector<Buffer*>& buffers, size_t grid_size, size_t threadgroup_size);
