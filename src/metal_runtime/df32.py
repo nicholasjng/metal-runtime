@@ -1,7 +1,61 @@
 import importlib.resources
 
+import numpy as np
+from numpy.typing import NDArray
+
 PRELUDE = (
     importlib.resources.files("metal_runtime")
     .joinpath("df32.metal")
     .read_text(encoding="utf-8")
 )
+
+
+def split(x: NDArray[np.float64]) -> NDArray[np.float32]:
+    """
+    Split an array of double-precision floats into (hi, lo) pairs of float32s.
+
+    `hi` is a 32-bit rounding of the input, and `lo` is the `x - hi` residual
+    computed in 64-bit precision. As the residual contains up to 53 - 24 = 29
+    significant bits, while `lo` has only 24, the resulting split loses 5 bits
+    of precision as compared to `np.float64`.
+
+    Parameters
+    ----------
+    x: NDArray[np.float64]
+        The input array to split.
+
+    Returns
+    -------
+        An array of shape `(*x.shape, 2)` consisting of `(hi, lo)` pairs of
+        `np.float32`s that make up `x`, up to arithmetic precision.
+    """
+    f32max = np.finfo(np.float32).max
+    finite = np.isfinite(x)
+    if np.any(finite & (np.abs(x) > f32max)):
+        raise ValueError("input array contains values out of range for np.float32")
+    hi = x.astype(np.float32)
+    hi64 = hi.astype(np.float64)
+    lo = np.subtract(x, hi64, out=np.zeros_like(x), where=finite)
+    return np.stack([hi, lo], axis=-1, dtype=np.float32)
+
+
+def join(pairs: NDArray[np.float32]) -> NDArray[np.float64]:
+    """
+    Join an array of `(hi, lo)` pairs of `np.float32`s into an array of `np.float64`
+    numbers.
+
+    The input `pairs` array must have a last dimension equal to 2.
+
+    Parameters
+    ----------
+    pairs: NDArray[np.float64]
+        The input array to create 64-bit floating point numbers from.
+
+    Returns
+    -------
+        An array of shape `(*x.shape[:-1])` consisting of `np.float64`s
+        with the low and high parts equal to the pair constituents.
+    """
+    if pairs.shape[-1] != 2:
+        raise ValueError("join(): input must be an array of shape (..., 2)")
+    return pairs[..., 0].astype(np.float64) + pairs[..., 1].astype(np.float64)
