@@ -9,6 +9,19 @@ wheels/
 # Virtual environments
 .venv
 
-# metal-cpp now comes from CMake (FetchContent) into build/, already ignored
-# above. ext/metal-cpp/ is the legacy download path — ignored, safe to delete.
+# build deps
 ext/metal-cpp/
+
+# Symlinked from current build/ wheel tag subdir
+compile_commands.json
+
+# macOS
+.DS_Store
+
+# IDE
+.zed/
+
+# Tooling
+.pytest_cache
+.ruff_cache
+.cache/clangd

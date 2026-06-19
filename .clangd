@@ -1,2 +1,14 @@
+# clangd configuration for Zed (and any clangd-driven LSP).
+
 CompileFlags:
-  CompilationDatabase: build
+  CompilationDatabase: .
+  Add:
+    - -std=c++17
+    - -Wno-unknown-warning-option
+
+Diagnostics:
+  Suppress:
+    - deprecated-declarations
+
+Index:
+  Background: Build
