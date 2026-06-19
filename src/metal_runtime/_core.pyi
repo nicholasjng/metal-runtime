@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Self
 
 import jax
-import mlx
+import mlx.core
 import numpy
 from numpy.typing import NDArray
 

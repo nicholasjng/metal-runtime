@@ -232,7 +232,7 @@ def test_dtype_override_reinterprets_rather_than_converts():
     """`.view` semantics: same bytes, different label. 1.5 as float32 is a
     specific bit pattern, and relabelling it must not touch it."""
     original = np.array([1.5, -2.25, 3.0, 0.0], dtype=np.float32)
-    buffer = mr.Buffer(original.view(np.uint32), dtype="float32")  # ty: ignore[invalid-argument-type]
+    buffer = mr.Buffer(original.view(np.uint32), dtype="float32")
     assert buffer.dtype == "float32"
     assert np.array_equal(buffer.to_numpy(), original)
 
@@ -277,7 +277,7 @@ def test_ml_dtypes_bfloat16_interop():
     }
     """
     array = np.array([1.0, 2.5, -3.75, 100.0], dtype=ml_dtypes.bfloat16)
-    buffer = mr.Buffer(array.view(np.uint16), dtype="bfloat16")  # ty: ignore[invalid-argument-type]
+    buffer = mr.Buffer(array.view(np.uint16), dtype="bfloat16")
 
     mr.run(mr.Kernel(source, "dbl"), grid=4, buffers=[buffer])
 
@@ -1244,7 +1244,7 @@ def test_copy_from_rejects_a_dtype_mismatch():
 def test_copy_from_relabels_with_an_explicit_dtype():
     buffer = mr.Buffer.zeros([4], "float32")
     values = np.array([1.5, -2.25, 3.0, 0.5], dtype=np.float32)
-    buffer.copy_from(values.view(np.uint32), dtype="float32")  # ty: ignore[invalid-argument-type]
+    buffer.copy_from(values.view(np.uint32), dtype="float32")
     assert np.array_equal(buffer.to_numpy(), values)
 
 

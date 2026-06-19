@@ -675,7 +675,7 @@ Raises
 TypeError
     dtype is bfloat16, which NumPy has no native dtype for.
 )doc")
-        .def("to_jax", &PyBuffer::to_jax, nb::sig("def to_jax(self) -> jax.Array"),
+        .def("to_jax", &PyBuffer::to_jax,
              R"doc(
 This buffer as a JAX array, via DLPack. Zero-copy.
 
@@ -683,7 +683,7 @@ Returns
 -------
 jax.Array
 )doc")
-        .def("to_mlx", &PyBuffer::to_mlx, nb::sig("def to_mlx(self) -> mlx.core.array"),
+        .def("to_mlx", &PyBuffer::to_mlx,
              R"doc(
 This buffer as an MLX array, via DLPack. Zero-copy.
 
