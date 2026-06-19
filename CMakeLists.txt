@@ -66,6 +66,16 @@ target_link_libraries(metal_runtime PUBLIC metal-cpp)
 # is belt-and-braces, but it keeps the requirement stated rather than inherited.
 set_target_properties(metal_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# extern "C" entry point into dispatch, for callers without Python/the GIL
+# (e.g. an XLA FFI handler). No nanobind dependency, builds unconditionally.
+# Installed inside the metal_runtime package directory so it ships in the
+# wheel; see src/metal_runtime/c_api.py's include_dir()/library_dir().
+add_library(metal_runtime_c SHARED src/c_api.cpp)
+target_link_libraries(metal_runtime_c PRIVATE metal_runtime)
+set_target_properties(metal_runtime_c PROPERTIES SOVERSION 1 VERSION 1.0.0)
+install(TARGETS metal_runtime_c LIBRARY DESTINATION metal_runtime)
+install(FILES src/c_api.h DESTINATION metal_runtime/include)
+
 # A plain `cmake -S . -B build` (system Python, no nanobind installed) should
 # still configure and build metal_runtime. Only scikit-build-core's build,
 # pointed at the project .venv where nanobind is a build dependency, needs the

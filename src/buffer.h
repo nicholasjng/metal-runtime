@@ -11,6 +11,14 @@ class Buffer;
 class Buffer {
    public:
     Buffer(MTL::Device* device, size_t size_bytes);
+
+    // Wraps caller-owned memory with no copy. external_ptr must stay valid
+    // and unmoved for this Buffer's lifetime; the caller keeps ownership and
+    // frees it only after this Buffer is destroyed. Requires page-aligned
+    // external_ptr/size_bytes; throws std::invalid_argument otherwise rather
+    // than silently falling back to a copy.
+    Buffer(MTL::Device* device, void* external_ptr, size_t size_bytes);
+
     ~Buffer();
     Buffer(Buffer&& other) noexcept;
     Buffer(const Buffer&) = delete;

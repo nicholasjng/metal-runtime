@@ -274,7 +274,7 @@ bool Library::has_function(const std::string& name) const {
     AutoreleaseScope scope;
     NS::Array* names = library_->functionNames();
     for (NS::UInteger i = 0; i < names->count(); ++i) {
-        auto* fn_name = static_cast<NS::String*>(names->object(i));
+        auto* fn_name = (NS::String*)names->object(i);
         if (name == fn_name->utf8String()) return true;
     }
     return false;

@@ -1,6 +1,9 @@
 #include "buffer.h"
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -16,6 +19,21 @@ Buffer::Buffer(MTL::Device* device, size_t size_bytes) : size_(size_bytes) {
     if (!buffer_) {
         throw std::runtime_error("failed to allocate Metal buffer of " +
                                  std::to_string(size_bytes) + " bytes");
+    }
+}
+
+Buffer::Buffer(MTL::Device* device, void* external_ptr, size_t size_bytes) : size_(size_bytes) {
+    size_t page_size = (size_t)getpagesize();
+    if ((uintptr_t)external_ptr % page_size != 0 || size_bytes % page_size != 0) {
+        throw std::invalid_argument(
+            "Buffer: external_ptr and size_bytes must both be a multiple of the page size (" +
+            std::to_string(page_size) + " bytes) to wrap without copying");
+    }
+    // No deallocator: the caller frees external_ptr, not this Buffer or Metal.
+    buffer_ = device->newBuffer(external_ptr, size_bytes, MTL::ResourceStorageModeShared, nullptr);
+    if (!buffer_) {
+        throw std::runtime_error("failed to wrap external memory of " + std::to_string(size_bytes) +
+                                 " bytes as a Metal buffer");
     }
 }
 

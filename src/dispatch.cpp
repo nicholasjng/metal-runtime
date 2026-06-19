@@ -62,7 +62,7 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
     if (reflection) {
         NS::Array* bindings = reflection->bindings();
         for (NS::UInteger i = 0; i < bindings->count(); ++i) {
-            auto* binding = static_cast<MTL::Binding*>(bindings->object(i));
+            auto* binding = (MTL::Binding*)bindings->object(i);
             if (!binding->isUsed()) continue;
             BindingInfo info{binding->index(), binding->name()->utf8String()};
             if (binding->type() == MTL::BindingTypeBuffer) {
