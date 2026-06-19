@@ -154,6 +154,15 @@ FunctionConstant coerce(const FunctionConstant& c, MTL::DataType declared) {
             return out;
 
         case FunctionConstant::Kind::Int: {
+            if (c.int_is_wide_unsigned) {
+                if (declared != MTL::DataTypeULong) {
+                    throw type_error(
+                        "a Python int too large for a signed 64-bit integer "
+                        "(fits only a 'ulong' constant)");
+                }
+                put((uint64_t)c.uint_value);
+                return out;
+            }
             long long v = c.int_value;
             auto in_range = [&](long long lo, long long hi) {
                 if (v < lo || v > hi) {
@@ -217,7 +226,8 @@ std::string pipeline_key(const std::string& name, const FunctionConstants& const
                 key += c.bool_value ? "B1" : "B0";
                 break;
             case FunctionConstant::Kind::Int:
-                key += "I" + std::to_string(c.int_value);
+                key += c.int_is_wide_unsigned ? "U" + std::to_string(c.uint_value)
+                                              : "I" + std::to_string(c.int_value);
                 break;
             case FunctionConstant::Kind::Float: {
                 uint64_t bits;

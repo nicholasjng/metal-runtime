@@ -262,7 +262,17 @@ FunctionConstants parse_constants(const nb::dict& constants) {
             c.bool_value = nb::cast<bool>(value);
         } else if (nb::isinstance<nb::int_>(value)) {
             c.kind = FunctionConstant::Kind::Int;
-            c.int_value = nb::cast<long long>(value);
+            // A value meant for a `ulong` constant past INT64_MAX needs the
+            // unsigned path, or the cast fails before reaching coerce().
+            long long v;
+            if (nb::try_cast<long long>(value, v)) {
+                c.int_value = v;
+            } else if (nb::try_cast<unsigned long long>(value, c.uint_value)) {
+                c.int_is_wide_unsigned = true;
+            } else {
+                throw std::invalid_argument("function constant '" + c.name +
+                                            "' is out of range for a 64-bit integer");
+            }
         } else if (nb::isinstance<nb::float_>(value)) {
             c.kind = FunctionConstant::Kind::Float;
             c.float_value = nb::cast<double>(value);

@@ -53,6 +53,10 @@ struct FunctionConstant {
     Kind kind = Kind::Exact;
     bool bool_value = false;
     long long int_value = 0;
+    // Set only when a Python int overflows `long long` (i.e. > INT64_MAX),
+    // the one case a ulong constant can represent that int_value cannot.
+    unsigned long long uint_value = 0;
+    bool int_is_wide_unsigned = false;
     double float_value = 0.0;
     DType dtype{};  // Exact only
     // Exact only: raw little-endian bytes, the first dtype.itemsize() meaningful.
