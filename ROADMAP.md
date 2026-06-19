@@ -30,7 +30,8 @@ MSL text.
 ### 0. metal-cpp via CMake (done)
 
 `CMakeLists.txt` pulls Apple's official metal-cpp with `FetchContent` at
-configure time. `metal_probe` prints the system GPU to prove the toolchain.
+configure time. A plain `cmake -S . -B build` builds the static library without
+nanobind, which proves the toolchain independently of the Python path.
 
 ### 1. Runtime core (C++ / metal-cpp), exposed to Python (done)
 

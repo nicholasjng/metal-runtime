@@ -18,8 +18,7 @@ class Buffer {
 
     void* contents() const;
 
-    // The requested size, which for an empty buffer is 0 even though the
-    // underlying allocation isn't -- see the constructor.
+    // The requested size, 0 for an empty buffer (=1 byte allocation).
     size_t size() const { return size_; }
     MTL::Buffer* handle() const { return buffer_; }
 

@@ -9,7 +9,7 @@ repos:
     rev: v22.1.8
     hooks:
       - id: clang-format
-        types_or: [c++, c]
+        types_or: [c++, c, metal]
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:

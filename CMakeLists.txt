@@ -66,14 +66,10 @@ target_link_libraries(metal_runtime PUBLIC metal-cpp)
 # is belt-and-braces, but it keeps the requirement stated rather than inherited.
 set_target_properties(metal_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Proves the metal-cpp fetch and Objective-C bridge work, independent of Python.
-add_executable(metal_probe src/main.cpp)
-target_link_libraries(metal_probe PRIVATE metal_runtime)
-
 # A plain `cmake -S . -B build` (system Python, no nanobind installed) should
-# still configure and build metal_runtime + metal_probe. Only scikit-build-core's
-# build, pointed at the project .venv where nanobind is a build dependency,
-# needs the `_core` extension target.
+# still configure and build metal_runtime. Only scikit-build-core's build,
+# pointed at the project .venv where nanobind is a build dependency, needs the
+# `_core` extension target.
 find_package(Python 3.11 COMPONENTS Interpreter Development.Module)
 
 set(METAL_RUNTIME_HAVE_NANOBIND FALSE)
@@ -134,6 +130,6 @@ if(METAL_RUNTIME_HAVE_NANOBIND)
   endif()
 else()
   message(STATUS "nanobind not found for ${Python_EXECUTABLE} -- skipping the "
-                  "_core Python extension target (metal_runtime + metal_probe "
-                  "still build). Use `uv sync` to build the full Python package.")
+                  "_core Python extension target (metal_runtime still builds). "
+                  "Use `uv sync` to build the full Python package.")
 endif()

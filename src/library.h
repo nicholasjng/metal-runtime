@@ -13,13 +13,12 @@ class Function;
 // arithmetic. `Fast` is Metal's own default, and it permits reassociation:
 // under it the compensation term of a Kahan summation, `c = (t - s) - y`,
 // folds algebraically to zero and is deleted outright, with no diagnostic.
-// Anything built on error-free transformations -- compensated accumulation,
-// double-single arithmetic -- has to compile under `Safe` to survive.
+// Anything built on error-free transformations (compensated accumulation,
+// double-single arithmetic), has to compile under `Safe` to survive.
 enum class MathMode { Safe, Relaxed, Fast };
 
 // Compile-time configuration for one MSL translation unit. Part of the library
-// cache key, so the same source compiled two ways yields two libraries rather
-// than whichever got there first.
+// cache key, so the same source compiled in two different ways yields two distinct libraries.
 struct CompileOptions {
     MathMode math_mode = MathMode::Fast;  // Metal's default, kept as ours
 
@@ -33,23 +32,18 @@ struct CompileOptions {
     std::string cache_key() const;
 };
 
-// Thrown when newLibrary fails to compile MSL source. Bound to Python as
-// CompileError so codegen callers can catch compile failures specifically,
-// not a generic RuntimeError.
+// Thrown when newLibrary fails to compile MSL source.
 struct MSLCompileError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// The source compiled but has no such entry point -- a typo'd or misspelled
-// kernel name. Derived from MSLCompileError, and bound to Python under it, so
-// that the one `except CompileError` a generator wraps its kernel construction
-// in catches both halves of "the MSL I emitted is wrong".
+// The source compiled but has no such entry point.
 struct MSLFunctionNotFoundError : MSLCompileError {
     using MSLCompileError::MSLCompileError;
 };
 
-// Compiles MSL source at runtime via newLibrary, the NVRTC equivalent: no
-// offline metal/metallib toolchain needed.
+// Compiles MSL source at runtime via newLibrary, the NVRTC equivalent:
+// no offline metal/metallib toolchain needed.
 class Library {
    public:
     Library(MTL::Device* device, const std::string& msl_source, const CompileOptions& options = {});

@@ -15,17 +15,12 @@ class Device;
 class CommandQueue;
 }  // namespace MTL
 
-// No Metal device on this machine, or no command queue on it. Thrown rather
-// than letting nil propagate: metal-cpp forwards messages to nil receivers
-// without crashing, so an unchecked null device stays invisible until it
-// resurfaces somewhere unrelated as "MSL compile error: unknown error".
+// No Metal device on this machine, or no command queue on it.
 struct NoDeviceError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// Default cap on cached libraries. Chosen to comfortably hold the distinct
-// kernels of a real program while still bounding a generator that emits one
-// specialization per input shape.
+// Default cap on cached libraries.
 inline constexpr size_t kDefaultLibraryCacheLimit = 256;
 
 class MetalRuntime {

@@ -81,7 +81,7 @@ size_t checked_element_count(const std::vector<size_t>& shape) {
 }
 
 // Resolves the dtype a buffer's bytes should be labelled with. An explicit
-// name reinterprets rather than converts -- numpy's `.view` semantics -- which
+// name reinterprets rather than converts (numpy's `.view` semantics), which
 // is the way in for element types NumPy itself can't hand across the boundary:
 // an ml_dtypes bfloat16 array exports through neither DLPack nor the buffer
 // protocol, so it arrives here as its uint16 view and gets relabelled.
@@ -124,9 +124,7 @@ class PyBuffer {
     }
 
     // `owner` ties the returned array's lifetime to this PyBuffer so it can't
-    // outlive the memory it views. Named to_numpy, not numpy: a same-named
-    // method shadows the numpy module in the generated .pyi stub's own class
-    // scope, since type checkers resolve names statically.
+    // outlive the memory it views.
     // `dtype` reinterprets on the way out, mirroring the constructor: the
     // escape hatch for element types NumPy can't represent on its own.
     nb::ndarray<nb::numpy> to_numpy(const std::optional<std::string>& dtype) {
@@ -281,12 +279,6 @@ class PyBatch {
     std::vector<nb::object> keepalive_;
 };
 
-// Spelled out rather than left to the stub generator. A scalar argument is
-// most naturally written `np.uint32(n)`, which is a numpy.generic and not an
-// ndarray -- nanobind accepts it either way, but the signature inferred from
-// HostArray says `Sequence[NDArray]`, and a type checker then rejects the
-// usage the README documents. Concatenated from one list of parameters so the
-// two overrides can't drift apart; both must track the C++ arguments below.
 #define METAL_RUNTIME_LAUNCH_PARAMS                                                    \
     "kernel: Kernel, grid: int | Sequence[int], "                                      \
     "threadgroup: int | Sequence[int] | None = None, buffers: Sequence[Buffer] = [], " \
@@ -313,11 +305,8 @@ NB_MODULE(_core, m) {
     // Registration order matters: nanobind prepends translators and tries them
     // most-recent-first, so a derived C++ exception has to be registered after
     // its base or the base's translator would swallow it. FunctionNotFoundError
-    // hangs off CompileError so one `except CompileError` catches both halves
-    // of "the MSL that got generated is wrong".
-    // Bound to names, not discarded temporaries: registration is the
-    // constructor's side effect, and naming them keeps clang-tidy from
-    // reading these as the unused-lock-guard bug its check targets.
+    // hangs off CompileError so one `except CompileError` catches both halves of
+    // "the generated MSL is wrong".
     [[maybe_unused]] nb::object device_error = nb::exception<NoDeviceError>(m, "DeviceError");
     nb::object compile_error = nb::exception<MSLCompileError>(m, "CompileError");
     [[maybe_unused]] nb::object not_found =

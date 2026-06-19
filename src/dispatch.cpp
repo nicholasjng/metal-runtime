@@ -187,10 +187,6 @@ void CommandBatch::wait() {
     command_buffer_->commit();
     command_buffer_->waitUntilCompleted();
 
-    // Without this a faulted command buffer -- a page fault in a kernel, a
-    // device removal, a timeout -- returns from waitUntilCompleted exactly
-    // like a successful one, and the caller reads back stale memory believing
-    // the kernel ran.
     if (command_buffer_->status() == MTL::CommandBufferStatusError) {
         NS::Error* error = command_buffer_->error();
         std::string message =

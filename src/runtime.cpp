@@ -32,11 +32,11 @@ std::string MetalRuntime::device_name() const {
 bool MetalRuntime::has_unified_memory() const { return device_->hasUnifiedMemory(); }
 
 size_t MetalRuntime::recommended_max_working_set_size() const {
-    return static_cast<size_t>(device_->recommendedMaxWorkingSetSize());
+    return (size_t)(device_->recommendedMaxWorkingSetSize());
 }
 
 size_t MetalRuntime::max_threads_per_threadgroup() const {
-    return static_cast<size_t>(device_->maxThreadsPerThreadgroup().width);
+    return (size_t)(device_->maxThreadsPerThreadgroup().width);
 }
 
 std::shared_ptr<Library> MetalRuntime::library_for(const std::string& msl_source,
@@ -58,9 +58,8 @@ std::shared_ptr<Library> MetalRuntime::library_for(const std::string& msl_source
     // Compiled outside the lock: newLibrary runs the whole MSL front end and
     // takes milliseconds, and holding the mutex across it would serialize
     // every thread compiling a *different* kernel. Two threads racing on the
-    // same source both compile, and the loser's copy is dropped below --
-    // wasted work in a rare case, in exchange for no contention in the common
-    // one.
+    // same source both compile, and the loser's copy is dropped below -
+    // wasted work in a rare case, in exchange for no contention in the common one.
     auto library = std::make_shared<Library>(device_, msl_source, options);
 
     std::lock_guard<std::mutex> lock(mutex_);

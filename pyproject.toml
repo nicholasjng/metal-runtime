@@ -42,7 +42,7 @@ test = [
 # Build against the project .venv so includes from Python packages (nanobind
 # etc.) in compile_commands.json survive across rebuilds -- same reasoning as mew.
 no-build-isolation-package = ["metal-runtime"]
-default-groups = ["build", "test", "zed"]
+default-groups = ["build", "test"]
 
 [tool.ruff]
 extend-exclude = ["ext"]

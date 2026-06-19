@@ -6,9 +6,9 @@
 
 std::string CompileOptions::cache_key() const {
     // Every variable-length field is length-prefixed, so no two distinct
-    // option sets can serialize to the same bytes -- a define named "a=1" and
-    // a define "a" valued "1" have to stay distinguishable.
-    std::string out = "math=" + std::to_string(static_cast<int>(math_mode));
+    // option sets can serialize to the same bytes. A define named "a=1" and
+    // a define "a" valued "1" stay distinguishable.
+    std::string out = "math=" + std::to_string((int)(math_mode));
     for (const auto& [name, value] : defines) {
         out += ";" + std::to_string(name.size()) + ":" + name;
         out += "=" + std::to_string(value.size()) + ":" + value;
