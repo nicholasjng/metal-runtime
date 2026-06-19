@@ -146,9 +146,6 @@ def test_library_cache_reuses_compiled_kernel():
     assert np.allclose(buffer_b.to_numpy(), array + 1.0)
 
 
-# --- buffer metadata ---------------------------------------------------------
-
-
 def test_buffer_exposes_shape_dtype_and_size():
     buffer = mr.Buffer.zeros([4, 3], "float32")
     assert buffer.shape == (4, 3)
@@ -157,9 +154,6 @@ def test_buffer_exposes_shape_dtype_and_size():
     assert buffer.nbytes == 48
     assert len(buffer) == 4
     assert repr(buffer) == "Buffer(shape=(4, 3), dtype='float32')"
-
-
-# --- dtypes ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -234,14 +228,11 @@ def test_bfloat16_buffer_reports_a_useful_readback_error():
         buffer.to_numpy()
 
 
-# --- dtype reinterpretation --------------------------------------------------
-
-
 def test_dtype_override_reinterprets_rather_than_converts():
     """`.view` semantics: same bytes, different label. 1.5 as float32 is a
     specific bit pattern, and relabelling it must not touch it."""
     original = np.array([1.5, -2.25, 3.0, 0.0], dtype=np.float32)
-    buffer = mr.Buffer(original.view(np.uint32), dtype="float32")
+    buffer = mr.Buffer(original.view(np.uint32), dtype="float32")  # ty: ignore[invalid-argument-type]
     assert buffer.dtype == "float32"
     assert np.array_equal(buffer.to_numpy(), original)
 
@@ -286,7 +277,7 @@ def test_ml_dtypes_bfloat16_interop():
     }
     """
     array = np.array([1.0, 2.5, -3.75, 100.0], dtype=ml_dtypes.bfloat16)
-    buffer = mr.Buffer(array.view(np.uint16), dtype="bfloat16")
+    buffer = mr.Buffer(array.view(np.uint16), dtype="bfloat16")  # ty: ignore[invalid-argument-type]
 
     mr.run(mr.Kernel(source, "dbl"), grid=4, buffers=[buffer])
 
@@ -302,9 +293,6 @@ def test_ml_dtypes_arrays_are_rejected_without_a_view():
         mr.Buffer(np.arange(4, dtype=ml_dtypes.bfloat16))
 
 
-# --- empty buffers -----------------------------------------------------------
-
-
 def test_empty_array_allocates():
     """newBuffer(0) returns nil, so a zero-element shape used to fail as if the
     device were out of memory."""
@@ -317,9 +305,6 @@ def test_zeros_with_a_degenerate_axis():
     buffer = mr.Buffer.zeros([0, 3])
     assert buffer.shape == (0, 3)
     assert buffer.to_numpy().shape == (0, 3)
-
-
-# --- scalars, grids, threadgroup memory --------------------------------------
 
 
 def test_scalars_bind_after_buffers():
@@ -367,9 +352,6 @@ def test_threadgroup_defaults_to_a_workable_size():
     buffer = mr.Buffer.zeros([1000])
     mr.run(mr.Kernel(_FILL_TID_SOURCE, "fill_tid"), grid=1000, buffers=[buffer])
     assert np.array_equal(buffer.to_numpy(), np.arange(1000, dtype=np.float32))
-
-
-# --- validation --------------------------------------------------------------
 
 
 def test_zero_grid_is_rejected():
@@ -430,9 +412,6 @@ def test_kernel_reports_its_own_limits():
     assert repr(kernel) == "Kernel(function_name='fill_tid')"
 
 
-# --- batching ----------------------------------------------------------------
-
-
 def test_batch_runs_launches_in_order():
     """One command buffer, five launches: the encoder is serial, so each add-one
     observes the previous one's writes."""
@@ -475,9 +454,6 @@ def test_batch_wait_is_idempotent():
     batch.wait()
     batch.wait()
     assert np.array_equal(buffer.to_numpy(), np.ones(4, dtype=np.float32))
-
-
-# --- library cache -----------------------------------------------------------
 
 
 @pytest.fixture
@@ -532,9 +508,6 @@ def test_clear_library_cache(restore_cache_limit):
     assert mr.library_cache_size() == 0
 
 
-# --- concurrency -------------------------------------------------------------
-
-
 def test_concurrent_compile_and_dispatch(restore_cache_limit):
     """The extension is built FREE_THREADED, so on a free-threaded interpreter
     these threads compile, dispatch and evict with no GIL between them."""
@@ -564,8 +537,6 @@ def test_concurrent_compile_and_dispatch(restore_cache_limit):
 
     assert not errors
 
-
-# --- compile options ---------------------------------------------------------
 
 # Sums 1.0 plus n copies of 2^-24. Each addend is exactly half an ulp of 1.0, so
 # naive FP32 accumulation rounds every one away under round-half-to-even and the
@@ -707,9 +678,6 @@ def test_unsupported_scalar_dtype_names_its_position():
         )
 
 
-# --- launch validation via reflection ------------------------------------------
-
-
 def test_missing_buffer_binding_names_the_argument():
     """A forgotten buffer must fail host-side, not as a GPU fault."""
     kernel = mr.Kernel(_AXPY_SOURCE, "axpy")
@@ -742,6 +710,32 @@ def test_threadgroup_memory_over_device_budget_raises():
         )
 
 
+def _run_axpy(kernel: mr.Kernel) -> None:
+    mr.run(
+        kernel,
+        grid=4,
+        buffers=[mr.Buffer.zeros([4]), mr.Buffer.zeros([4])],
+        scalars=[np.float32(2.0), np.uint32(4)],
+    )
+
+
+def test_shape_validation_cache_does_not_paper_over_a_later_bad_shape():
+    """A cached-valid shape must not shadow a genuinely invalid one."""
+    kernel = mr.Kernel(_AXPY_SOURCE, "axpy")
+    _run_axpy(kernel)
+    _run_axpy(kernel)  # same shape again: cache hit
+    with pytest.raises(ValueError, match="'a' at buffer index 2"):
+        mr.run(kernel, grid=4, buffers=[mr.Buffer.zeros([4]), mr.Buffer.zeros([4])])
+
+
+def test_shape_validation_cache_does_not_wrongly_reject_after_a_bad_shape():
+    """A failed validation must not get cached."""
+    kernel = mr.Kernel(_AXPY_SOURCE, "axpy")
+    with pytest.raises(ValueError, match="'a' at buffer index 2"):
+        mr.run(kernel, grid=4, buffers=[mr.Buffer.zeros([4]), mr.Buffer.zeros([4])])
+    _run_axpy(kernel)
+
+
 def test_huge_threadgroup_dimensions_cannot_wrap_past_the_limit():
     """(2**32, 2**32) wraps the volume to 0; per-dimension checks must fire first."""
     kernel = mr.Kernel(_FILL_TID_SOURCE, "fill_tid")
@@ -753,8 +747,6 @@ def test_huge_threadgroup_dimensions_cannot_wrap_past_the_limit():
             buffers=[mr.Buffer.zeros([4])],
         )
 
-
-# --- function constants ---------------------------------------------------------
 
 _CONSTANTS_SOURCE = """
 #include <metal_stdlib>
@@ -876,6 +868,38 @@ def test_non_scalar_constant_is_rejected():
         mr.Kernel(_CONSTANTS_SOURCE, "scaled", constants={"N": "256"})
 
 
+_ULONG_CONSTANT_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+constant ulong BIG [[function_constant(0)]];
+
+kernel void report_big(device ulong* buf [[buffer(0)]]) {
+    buf[0] = BIG;
+}
+"""
+
+
+def test_python_int_past_int64_max_specializes_a_ulong_constant():
+    """Only a `ulong` constant can hold a Python int past INT64_MAX."""
+    big = 2**64 - 1
+    buffer = mr.Buffer.zeros([1], dtype="uint64")
+    kernel = mr.Kernel(_ULONG_CONSTANT_SOURCE, "report_big", constants={"BIG": big})
+    mr.run(kernel, grid=1, buffers=[buffer])
+    assert buffer.to_numpy()[0] == big
+
+
+def test_python_int_past_int64_max_rejected_for_non_ulong_constant():
+    with pytest.raises(
+        mr.CompileError, match="declared as 'uint'.*fits only a 'ulong'"
+    ):
+        mr.Kernel(
+            _CONSTANTS_SOURCE,
+            "scaled",
+            constants={"SCALE": 1.0, "N": 2**64 - 1, "NEGATE": False},
+        )
+
+
 _OPTIONAL_CONSTANT_SOURCE = """
 #include <metal_stdlib>
 using namespace metal;
@@ -947,9 +971,6 @@ def test_constants_are_scoped_per_entry_point():
         mr.Kernel(_MIXED_TU_SOURCE, "plain", constants={"SCALE": 1.0})
 
 
-# --- buffer offsets --------------------------------------------------------------
-
-
 def test_buffer_binds_at_an_offset():
     """One arena, two logical arrays via a byte offset."""
     arena = mr.Buffer(np.arange(8, dtype=np.float32))
@@ -965,9 +986,6 @@ def test_offset_out_of_bounds_is_rejected():
     kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
     with pytest.raises(ValueError, match="out of bounds"):
         mr.run(kernel, grid=1, buffers=[(arena, 64)])
-
-
-# --- async batches ----------------------------------------------------------------
 
 
 def test_commit_returns_before_wait_and_wait_collects():
@@ -1036,8 +1054,6 @@ def test_concurrent_batch_with_barrier_orders_dependent_launches():
     assert np.array_equal(buffer.to_numpy(), np.full(4, 2.0, dtype=np.float32))
 
 
-# --- indirect dispatch --------------------------------------------------------------
-
 _FILL_CONST_SOURCE = """
 #include <metal_stdlib>
 using namespace metal;
@@ -1090,9 +1106,6 @@ def test_indirect_offset_without_indirect_grid_is_rejected():
         mr.run(kernel, grid=4, buffers=[mr.Buffer.zeros([4])], indirect_offset=8)
 
 
-# --- buffer reuse and interop --------------------------------------------------------
-
-
 def test_empty_skips_initialization_but_is_usable():
     buffer = mr.Buffer.empty([8], "float32")
     assert buffer.shape == (8,)
@@ -1123,7 +1136,7 @@ def test_copy_from_rejects_a_dtype_mismatch():
 def test_copy_from_relabels_with_an_explicit_dtype():
     buffer = mr.Buffer.zeros([4], "float32")
     values = np.array([1.5, -2.25, 3.0, 0.5], dtype=np.float32)
-    buffer.copy_from(values.view(np.uint32), dtype="float32")
+    buffer.copy_from(values.view(np.uint32), dtype="float32")  # ty: ignore[invalid-argument-type]
     assert np.array_equal(buffer.to_numpy(), values)
 
 
@@ -1143,9 +1156,6 @@ def test_len_of_a_zero_dim_buffer_raises_like_numpy():
     assert buffer.shape == ()
     with pytest.raises(TypeError, match="unsized"):
         len(buffer)
-
-
-# --- introspection additions ------------------------------------------------------
 
 
 def test_device_info_reports_memory_limits():
@@ -1168,9 +1178,6 @@ def test_kernel_reports_static_threadgroup_memory():
     kernel = mr.Kernel(source, "s")
     assert kernel.static_threadgroup_memory_length >= 64 * 4
     assert mr.Kernel(_FILL_TID_SOURCE, "fill_tid").static_threadgroup_memory_length == 0
-
-
-# --- readback aliasing -------------------------------------------------------
 
 
 def test_to_numpy_is_a_live_view_of_shared_memory():
