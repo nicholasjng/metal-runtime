@@ -41,19 +41,18 @@ MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name, MRPipeli
                          char** out_err_msg);
 void mr_release_pipeline(MRPipeline* pipeline);
 
-// Wraps `ptr` for use in mr_dispatch. Zero-copy if `ptr`/`size_bytes` are
-// both page-aligned; otherwise falls back to an owned copy, synced back by
-// mr_buffer_flush_to. Caller keeps owning `ptr`; this never frees it.
+// Wraps `ptr` for use in mr_dispatch. Zero-copy for any `ptr`/`size_bytes`,
+// not just page-aligned ones: rounds the range out to the enclosing page
+// boundaries (newBufferWithBytesNoCopy's hard requirement) and dispatch
+// binds at the true data offset within that rounded region automatically.
+// Falls back to an owned copy, synced back by mr_buffer_flush_to, only if
+// the rounded range would reach outside ptr's actual VM mapping (checked
+// via mach_vm_region before ever handing memory to Metal). Caller keeps
+// owning `ptr`; this never frees it.
 //
-// Open item: which branch a real XLA FFI handler hits is unverified (no
-// XLA/JAX dependency here to test against). To close it out:
-//   1. In the handler, check `ptr % pagesize` and `size_bytes % pagesize`
-//      for actual xla::ffi::Buffer<F32> pointers, across a few shapes.
-//   2. Aligned: no change needed, zero-copy already fires automatically.
-//   3. Not aligned: determine if that's inherent to XLA's allocator (copy
-//      path is then permanent; measure its cost) or specific to how that
-//      buffer was created (a different allocation strategy may avoid it).
-//   4. Record the finding here and in palladium's NEXT.md/ROADMAP.md.
+// Real xla::ffi::Buffer<F32> pointers were measured page-aligned on neither
+// `ptr` nor `size_bytes`, so page-rounding is the path that actually matters,
+// not an edge case.
 MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, char** out_err_msg);
 
 // Copies the buffer's contents back to `ptr`. No-op if the wrap was

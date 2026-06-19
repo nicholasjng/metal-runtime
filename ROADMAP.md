@@ -62,9 +62,9 @@ dispatch fine), and asynchronous dispatch — `Batch` still blocks at the end.
 
 Nothing upstream of "compile this MSL text and run it" belongs here. The
 Pallas-kernel-to-MSL codegen path, the JAX-side tracing, and the entry point
-tying it to `Kernel`/`Buffer`/`run` live in the `pagode` repo (being renamed
-`palladium`), see its own `ROADMAP.md`, reformulated against the actual
-JAX/Pallas source (Pallas has no third-party backend extension point).
+tying it to `Kernel`/`Buffer`/`run` live in the `palladium` repo, reformulated
+against the actual JAX/Pallas source (Pallas has no third-party backend
+extension point).
 
 An arbitrary-JAX-program frontend is still a plausible direction if the
 Pallas-specific track outgrows itself, but there's no concrete plan for it. It

@@ -1,5 +1,7 @@
 #include "c_api.h"
 
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <unistd.h>
 
 #include <cstdint>
@@ -27,6 +29,8 @@ struct MRPipeline {
 struct MRBuffer {
     Buffer buffer;
     void* external_ptr = nullptr;  // set even on the copy path, for flush_to
+    size_t external_offset = 0;    // buffer.contents() + external_offset == external_ptr
+    bool owns_copy = false;        // true: buffer is a private copy, flush_to must run
 };
 
 namespace {
@@ -67,6 +71,32 @@ MRStatus mr_guard(char** out_err_msg, Fn&& fn) {
     }
 }
 
+// True if every byte of [start, start + length) lies in one mapped,
+// read+write VM region. Page-rounding a caller-supplied pointer can grow
+// the wrapped range past what the caller actually owns; this is what
+// keeps that growth from ever reaching into unmapped memory before
+// handing the range to Metal.
+bool region_is_mapped_rw(void* start, size_t length) {
+    if (length == 0) return true;
+    mach_vm_address_t queried = (mach_vm_address_t)(uintptr_t)start;
+    mach_vm_address_t addr = queried;
+    mach_vm_size_t region_size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name = MACH_PORT_NULL;
+    kern_return_t kr =
+        mach_vm_region(mach_task_self(), &addr, &region_size, VM_REGION_BASIC_INFO_64,
+                       (vm_region_info_t)&info, &info_count, &object_name);
+    if (object_name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object_name);
+    if (kr != KERN_SUCCESS) return false;
+    // mach_vm_region rounds `addr` up to the next mapped region when the
+    // queried address itself falls in an unmapped hole; if it moved,
+    // `start` was never mapped in the first place.
+    if (addr > queried) return false;
+    if (!(info.protection & VM_PROT_READ) || !(info.protection & VM_PROT_WRITE)) return false;
+    return queried + (mach_vm_size_t)length <= addr + region_size;
+}
+
 }  // namespace
 
 void mr_free_error_message(char* msg) { std::free(msg); }
@@ -101,26 +131,42 @@ MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, cha
         if (!ptr && size_bytes > 0) {
             throw std::invalid_argument("mr_wrap_buffer: ptr is null for a nonzero size");
         }
-        size_t page_size = (size_t)getpagesize();
-        bool page_aligned =
-            size_bytes > 0 && (uintptr_t)ptr % page_size == 0 && size_bytes % page_size == 0;
-        if (page_aligned) {
-            auto* buf = new MRBuffer{Buffer(runtime().device(), ptr, size_bytes), ptr};
-            *out_buffer = buf;
-        } else {
-            Buffer owned(runtime().device(), size_bytes);
-            if (size_bytes > 0) std::memcpy(owned.contents(), ptr, size_bytes);
-            auto* buf = new MRBuffer{std::move(owned), ptr};
-            *out_buffer = buf;
+
+        if (size_bytes > 0) {
+            // Round [ptr, ptr + size_bytes) out to enclosing page boundaries:
+            // newBufferWithBytesNoCopy (Buffer's external-ptr constructor)
+            // requires both page-exact, which real allocations almost never are
+            // on their own. The true data starts `offset` bytes into the wrapped
+            // region; mr_dispatch adds that back in via external_offset, so callers
+            // never see it. Falls back to an owned copy if the rounded range would
+            // reach outside ptr's actual mapping.
+            size_t page_size = (size_t)getpagesize();
+            uintptr_t addr = (uintptr_t)ptr;
+            uintptr_t page_start = addr & ~(uintptr_t)(page_size - 1);
+            size_t offset = addr - page_start;
+            size_t wrapped_length = ((offset + size_bytes + page_size - 1) / page_size) * page_size;
+
+            if (region_is_mapped_rw((void*)page_start, wrapped_length)) {
+                auto* buf =
+                    new MRBuffer{Buffer(runtime().device(), (void*)page_start, wrapped_length), ptr,
+                                 offset, false};
+                *out_buffer = buf;
+                return;
+            }
         }
+
+        Buffer owned(runtime().device(), size_bytes);
+        if (size_bytes > 0) std::memcpy(owned.contents(), ptr, size_bytes);
+        auto* buf = new MRBuffer{std::move(owned), ptr, 0, true};
+        *out_buffer = buf;
     });
 }
 
 MRStatus mr_buffer_flush_to(MRBuffer* buffer, char** out_err_msg) {
     return mr_guard(out_err_msg, [&] {
         if (!buffer) throw std::invalid_argument("mr_buffer_flush_to: buffer is null");
-        // Zero-copy: contents() is already external_ptr, nothing to sync.
-        if (buffer->buffer.contents() == buffer->external_ptr) return;
+        // Zero-copy (page-exact or page-rounded): nothing to sync back.
+        if (!buffer->owns_copy) return;
         if (buffer->buffer.size() > 0) {
             std::memcpy(buffer->external_ptr, buffer->buffer.contents(), buffer->buffer.size());
         }
@@ -142,8 +188,9 @@ MRStatus mr_dispatch(const MRLaunchDesc* launch_desc, char** out_err_msg) {
                 throw std::invalid_argument("mr_dispatch: buffers[" + std::to_string(i) +
                                             "] is null");
             }
-            launch.buffers.emplace_back(&launch_desc->buffers[i]->buffer,
-                                        launch_desc->buffer_offsets[i]);
+            launch.buffers.emplace_back(
+                &launch_desc->buffers[i]->buffer,
+                launch_desc->buffer_offsets[i] + launch_desc->buffers[i]->external_offset);
         }
         for (size_t i = 0; i < launch_desc->scalar_count; ++i) {
             launch.scalars.emplace_back(launch_desc->scalars[i], launch_desc->scalar_sizes[i]);

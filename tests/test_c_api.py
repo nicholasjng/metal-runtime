@@ -5,6 +5,7 @@ handler would: only the C ABI in c_api.h, no Python/GIL in the calls.
 import ctypes
 import mmap
 import os
+import threading
 
 import numpy as np
 import pytest
@@ -133,8 +134,10 @@ def _dispatch_add_one(lib, pipeline, buffer, n: int):
 
 
 def test_compile_and_dispatch_round_trip_with_a_misaligned_buffer(lib):
-    """A plain numpy allocation isn't page-aligned: exercises the
-    copy-on-wrap / copy-back-on-flush fallback path."""
+    """A plain numpy allocation isn't page-aligned: exercises whichever
+    wrap path mr_wrap_buffer picks for it (page-rounded zero-copy or, if
+    that range isn't safely mappable, the owned-copy fallback); either
+    way mr_buffer_flush_to must leave `array` correct."""
     status, library, err = _compile(lib, _ADD_ONE_SOURCE)
     assert status == MR_OK, err.value
 
@@ -159,6 +162,45 @@ def test_compile_and_dispatch_round_trip_with_a_misaligned_buffer(lib):
     assert status == MR_OK, err.value
 
     assert np.array_equal(array, np.arange(16, dtype=np.float32) + 1.0)
+
+    lib.mr_release_buffer(buffer)
+    lib.mr_release_pipeline(pipeline)
+    lib.mr_release_library(library)
+
+
+def test_dispatch_writes_are_visible_without_flush_for_a_page_rounded_buffer(lib):
+    """Proves the page-rounded wrap is actually zero-copy, not merely
+    error-free: dispatches into a buffer with a realistic (64-byte,
+    XLA-style) but non-page-aligned offset inside a page-aligned mmap
+    region, then reads the array back *without* calling
+    mr_buffer_flush_to. Only true memory aliasing makes that visible."""
+    status, library, err = _compile(lib, _ADD_ONE_SOURCE)
+    assert status == MR_OK, err.value
+
+    status, pipeline, err = _get_pipeline(lib, library, b"add_one")
+    assert status == MR_OK, err.value
+
+    region = mmap.mmap(-1, mmap.PAGESIZE)
+    base = ctypes.addressof(ctypes.c_char.from_buffer(region))
+    assert base % mmap.PAGESIZE == 0
+    offset = 64  # SIMD-width aligned, deliberately not page-aligned
+    n = 16
+    array = np.frombuffer(region, dtype=np.float32, count=n, offset=offset)
+    array[:] = np.arange(n, dtype=np.float32)
+    ptr = ctypes.c_void_p(base + offset)
+
+    err = ctypes.c_char_p()
+    buffer = ctypes.c_void_p()
+    status = lib.mr_wrap_buffer(
+        ptr, array.nbytes, ctypes.byref(buffer), ctypes.byref(err)
+    )
+    assert status == MR_OK, err.value
+
+    status, err = _dispatch_add_one(lib, pipeline, buffer, n)
+    assert status == MR_OK, err.value
+
+    # Deliberately no mr_buffer_flush_to call here.
+    assert np.array_equal(array, np.arange(n, dtype=np.float32) + 1.0)
 
     lib.mr_release_buffer(buffer)
     lib.mr_release_pipeline(pipeline)
@@ -229,3 +271,68 @@ def test_repeated_compile_and_release_does_not_crash(lib):
         assert status == MR_OK, err.value
         lib.mr_release_pipeline(pipeline)
         lib.mr_release_library(library)
+
+
+def test_concurrent_dispatch_against_one_shared_pipeline_does_not_corrupt(lib):
+    """XLA's CPU backend runs FFI handlers on its own compute thread pool
+    (xla/ffi/api/c_api.h), with no trait to opt out of concurrent calls, so
+    a real handler backing mr_dispatch has to survive many threads racing
+    mr_get_pipeline on one shared MRLibrary and dispatching through the
+    resulting MRPipeline at once. Each thread wraps and dispatches into its
+    own buffer; correctness of the readback is what actually proves no
+    shared cache/state got corrupted, not just the absence of a crash."""
+    status, library, err = _compile(lib, _ADD_ONE_SOURCE)
+    assert status == MR_OK, err.value
+
+    n_threads = 24
+    n_iters = 20
+    barrier = threading.Barrier(n_threads)
+    errors: list[tuple[int, str]] = []
+    errors_lock = threading.Lock()
+
+    def worker(tid: int) -> None:
+        try:
+            barrier.wait()
+            for it in range(n_iters):
+                status, pipeline, err = _get_pipeline(lib, library, b"add_one")
+                assert status == MR_OK, err.value
+
+                n = 11 + tid
+                array = np.arange(n, dtype=np.float32)
+                ptr = array.ctypes.data_as(ctypes.c_void_p)
+
+                err = ctypes.c_char_p()
+                buffer = ctypes.c_void_p()
+                status = lib.mr_wrap_buffer(
+                    ptr, array.nbytes, ctypes.byref(buffer), ctypes.byref(err)
+                )
+                assert status == MR_OK, err.value
+
+                status, err = _dispatch_add_one(lib, pipeline, buffer, n)
+                assert status == MR_OK, err.value
+
+                err = ctypes.c_char_p()
+                status = lib.mr_buffer_flush_to(buffer, ctypes.byref(err))
+                assert status == MR_OK, err.value
+
+                expect = np.arange(n, dtype=np.float32) + 1.0
+                if not np.array_equal(array, expect):
+                    raise AssertionError(
+                        f"tid={tid} it={it}: got {array[:5]}, want {expect[:5]}"
+                    )
+
+                lib.mr_release_buffer(buffer)
+                lib.mr_release_pipeline(pipeline)
+        except Exception as e:  # noqa: BLE001 - collected and re-raised on the main thread
+            with errors_lock:
+                errors.append((tid, repr(e)))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    lib.mr_release_library(library)
+
+    assert not errors, errors
