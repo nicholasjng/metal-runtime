@@ -15,6 +15,7 @@ namespace MTL {
 class Device;
 class Library;
 class Function;
+class BinaryArchive;
 }  // namespace MTL
 
 class ComputePipeline;
@@ -90,9 +91,11 @@ class Library {
     MTL::Function* function(const std::string& name, const FunctionConstants& constants = {}) const;
 
     // Cached: newComputePipelineState costs milliseconds. The cache lives
-    // here so evicting a library drops its pipelines with it.
+    // here so evicting a library drops its pipelines with it. `archive`
+    // passes straight through to ComputePipeline on a cache miss.
     std::shared_ptr<ComputePipeline> pipeline_for(const std::string& name,
-                                                  const FunctionConstants& constants = {});
+                                                  const FunctionConstants& constants = {},
+                                                  MTL::BinaryArchive* archive = nullptr);
 
    private:
     bool has_function(const std::string& name) const;

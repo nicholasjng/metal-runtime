@@ -12,8 +12,11 @@ from metal_runtime._core import (
     device_name,
     library_cache_limit,
     library_cache_size,
+    pipeline_cache_dir,
     run,
+    save_pipeline_cache,
     set_library_cache_limit,
+    set_pipeline_cache_dir,
     supported_dtypes,
 )
 
@@ -32,8 +35,11 @@ __all__ = [
     "device_name",
     "library_cache_limit",
     "library_cache_size",
+    "pipeline_cache_dir",
     "run",
+    "save_pipeline_cache",
     "set_library_cache_limit",
+    "set_pipeline_cache_dir",
     "supported_dtypes",
 ]
 

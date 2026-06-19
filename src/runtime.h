@@ -3,6 +3,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -13,6 +14,7 @@
 namespace MTL {
 class Device;
 class CommandQueue;
+class BinaryArchive;
 }  // namespace MTL
 
 // No Metal device on this machine, or no command queue on it.
@@ -62,6 +64,20 @@ class MetalRuntime {
     size_t library_cache_size() const;
     void clear_library_cache();
 
+    // Off by default. A path loads an existing archive there if one exists,
+    // else starts an empty one; nullopt turns caching back off. Metal's own
+    // archive lookup keys on compiled content, so a source/option change
+    // misses and recompiles rather than serving stale code. Call once at
+    // startup: a concurrent call could swap the archive out from under an
+    // in-flight build.
+    void set_pipeline_cache_dir(std::optional<std::string> path);
+    std::optional<std::string> pipeline_cache_dir() const;
+
+    // Explicit, not automatic on process exit.
+    void save_pipeline_cache();
+
+    MTL::BinaryArchive* pipeline_archive() const;
+
    private:
     void evict_locked();
 
@@ -79,6 +95,9 @@ class MetalRuntime {
     std::unordered_map<std::string, std::pair<std::shared_ptr<Library>, LRUList::iterator>>
         libraries_;
     size_t cache_limit_ = kDefaultLibraryCacheLimit;
+
+    MTL::BinaryArchive* pipeline_archive_ = nullptr;
+    std::string pipeline_cache_path_;
 };
 
 MetalRuntime& runtime();

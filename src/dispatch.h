@@ -18,6 +18,7 @@ class CommandBuffer;
 class ComputeCommandEncoder;
 class ComputePipelineState;
 class Function;
+class BinaryArchive;
 }  // namespace MTL
 
 // The GPU rejected or aborted a committed command buffer. Distinct from a
@@ -43,8 +44,11 @@ struct BindingInfo {
 class ComputePipeline {
    public:
     // Takes ownership of `function` (releases it after building the pipeline).
-    // `label` is the entry-point name, used in error messages only.
-    ComputePipeline(MTL::Device* device, MTL::Function* function, const std::string& label);
+    // `label` is the entry-point name, used in error messages only. `archive`
+    // (borrowed, may be null) skips recompilation on a matching prior build,
+    // even across process runs; a fresh build stages into it.
+    ComputePipeline(MTL::Device* device, MTL::Function* function, const std::string& label,
+                    MTL::BinaryArchive* archive = nullptr);
     ~ComputePipeline();
     ComputePipeline(ComputePipeline&& other) noexcept;
     ComputePipeline(const ComputePipeline&) = delete;

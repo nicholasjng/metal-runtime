@@ -301,7 +301,8 @@ class PyKernel {
              const std::map<std::string, std::string>& defines, const nb::dict& constants)
         : options_{math_mode, defines},
           library_(runtime().library_for(msl_source, options_)),
-          pipeline_(library_->pipeline_for(function_name, parse_constants(constants))),
+          pipeline_(library_->pipeline_for(function_name, parse_constants(constants),
+                                           runtime().pipeline_archive())),
           function_name_(function_name) {
         for (auto [key, value] : constants) constants_[key] = value;
     }
@@ -501,6 +502,12 @@ NB_MODULE(_core, m) {
         "set_library_cache_limit", [](size_t limit) { runtime().set_library_cache_limit(limit); },
         "limit"_a);
     m.def("clear_library_cache", []() { runtime().clear_library_cache(); });
+
+    m.def(
+        "set_pipeline_cache_dir",
+        [](std::optional<std::string> path) { runtime().set_pipeline_cache_dir(path); }, "path"_a);
+    m.def("pipeline_cache_dir", []() { return runtime().pipeline_cache_dir(); });
+    m.def("save_pipeline_cache", []() { runtime().save_pipeline_cache(); });
 
     nb::class_<PyBuffer>(m, "Buffer")
         .def(nb::init<HostArray, const std::optional<std::string>&>(), "array"_a,

@@ -367,7 +367,8 @@ MTL::Function* Library::create_specialized(const std::string& name,
 }
 
 std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
-                                                       const FunctionConstants& constants) {
+                                                       const FunctionConstants& constants,
+                                                       MTL::BinaryArchive* archive) {
     const std::string key = pipeline_key(name, constants);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -393,7 +394,7 @@ std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
     }
 
     // Built outside the lock, same tradeoff as the library cache.
-    auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name);
+    auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name, archive);
 
     std::lock_guard<std::mutex> lock(mutex_);
     auto [it, inserted] = pipelines_.emplace(canonical_key, std::move(pipeline));

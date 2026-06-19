@@ -508,6 +508,68 @@ def test_clear_library_cache(restore_cache_limit):
     assert mr.library_cache_size() == 0
 
 
+@pytest.fixture
+def restore_pipeline_cache_dir():
+    yield
+    mr.set_pipeline_cache_dir(None)
+
+
+def test_pipeline_cache_dir_defaults_to_off(restore_pipeline_cache_dir):
+    mr.set_pipeline_cache_dir(None)
+    assert mr.pipeline_cache_dir() is None
+
+
+def test_pipeline_cache_dir_reports_the_configured_path(
+    tmp_path, restore_pipeline_cache_dir
+):
+    path = str(tmp_path / "pipelines.bin")
+    mr.set_pipeline_cache_dir(path)
+    assert mr.pipeline_cache_dir() == path
+    mr.set_pipeline_cache_dir(None)
+    assert mr.pipeline_cache_dir() is None
+
+
+def test_pipeline_cache_dispatches_correctly_while_enabled(
+    tmp_path, restore_pipeline_cache_dir
+):
+    """Building against a live archive must not change dispatch behavior."""
+    mr.set_pipeline_cache_dir(str(tmp_path / "pipelines.bin"))
+    array = np.arange(8, dtype=np.float32)
+    buffer = mr.Buffer(array)
+    mr.run(mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=8, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), array + 1.0)
+
+
+def test_save_pipeline_cache_without_a_dir_raises(restore_pipeline_cache_dir):
+    mr.set_pipeline_cache_dir(None)
+    with pytest.raises(RuntimeError):
+        mr.save_pipeline_cache()
+
+
+def test_save_pipeline_cache_writes_a_reusable_file(
+    tmp_path, restore_cache_limit, restore_pipeline_cache_dir
+):
+    path = tmp_path / "pipelines.bin"
+    mr.set_pipeline_cache_dir(str(path))
+    # A fresh build is required to stage anything into the archive.
+    mr.clear_library_cache()
+    mr.run(
+        mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=4, buffers=[mr.Buffer.zeros([4])]
+    )
+    mr.save_pipeline_cache()
+    assert path.exists()
+    assert path.stat().st_size > 0
+
+    # Forces a rebuild against the reloaded archive rather than an in-process hit.
+    mr.clear_library_cache()
+    mr.set_pipeline_cache_dir(None)
+    mr.set_pipeline_cache_dir(str(path))
+    array = np.arange(4, dtype=np.float32)
+    buffer = mr.Buffer(array)
+    mr.run(mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=4, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), array + 1.0)
+
+
 def test_concurrent_compile_and_dispatch(restore_cache_limit):
     """The extension is built FREE_THREADED, so on a free-threaded interpreter
     these threads compile, dispatch and evict with no GIL between them."""

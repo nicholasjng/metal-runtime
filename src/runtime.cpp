@@ -1,6 +1,14 @@
 #include "runtime.h"
 
+#include <unistd.h>
+
 #include "metal.h"
+
+namespace {
+
+bool file_exists(const std::string& path) { return ::access(path.c_str(), F_OK) == 0; }
+
+}  // namespace
 
 MetalRuntime::MetalRuntime() {
     device_ = MTL::CreateSystemDefaultDevice();
@@ -20,6 +28,7 @@ MetalRuntime::MetalRuntime() {
 }
 
 MetalRuntime::~MetalRuntime() {
+    if (pipeline_archive_) pipeline_archive_->release();
     if (queue_) queue_->release();
     if (device_) device_->release();
 }
@@ -108,6 +117,64 @@ void MetalRuntime::clear_library_cache() {
     std::lock_guard<std::mutex> lock(mutex_);
     libraries_.clear();
     lru_.clear();
+}
+
+void MetalRuntime::set_pipeline_cache_dir(std::optional<std::string> path) {
+    AutoreleaseScope scope;
+    MTL::BinaryArchive* archive = nullptr;
+    if (path) {
+        MTL::BinaryArchiveDescriptor* descriptor =
+            MTL::BinaryArchiveDescriptor::alloc()->init()->autorelease();
+        if (file_exists(*path)) {
+            NS::String* p = NS::String::string(path->c_str(), NS::UTF8StringEncoding);
+            descriptor->setUrl(NS::URL::fileURLWithPath(p));
+        }
+        NS::Error* error = nullptr;
+        archive = device_->newBinaryArchive(descriptor, &error);
+        if (!archive) {
+            std::string message =
+                error ? error->localizedDescription()->utf8String() : "unknown error";
+            throw std::runtime_error("failed to open pipeline cache at " + *path + ": " + message);
+        }
+        archive->retain();
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (pipeline_archive_) pipeline_archive_->release();
+    pipeline_archive_ = archive;
+    pipeline_cache_path_ = path.value_or("");
+}
+
+std::optional<std::string> MetalRuntime::pipeline_cache_dir() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pipeline_archive_) return std::nullopt;
+    return pipeline_cache_path_;
+}
+
+void MetalRuntime::save_pipeline_cache() {
+    AutoreleaseScope scope;
+    MTL::BinaryArchive* archive;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!pipeline_archive_) {
+            throw std::runtime_error(
+                "no pipeline cache directory set; call set_pipeline_cache_dir() first");
+        }
+        archive = pipeline_archive_;
+        path = pipeline_cache_path_;
+    }
+    NS::String* p = NS::String::string(path.c_str(), NS::UTF8StringEncoding);
+    NS::Error* error = nullptr;
+    if (!archive->serializeToURL(NS::URL::fileURLWithPath(p), &error)) {
+        std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
+        throw std::runtime_error("failed to write pipeline cache to " + path + ": " + message);
+    }
+}
+
+MTL::BinaryArchive* MetalRuntime::pipeline_archive() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pipeline_archive_;
 }
 
 MetalRuntime& runtime() {

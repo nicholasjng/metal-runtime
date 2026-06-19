@@ -32,18 +32,32 @@ size_t rounded_threadgroup_length(size_t length) {
 }  // namespace
 
 ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
-                                 const std::string& label)
+                                 const std::string& label, MTL::BinaryArchive* archive)
     : label_(label) {
     AutoreleaseScope scope;
     NS::Error* error = nullptr;
+
+    // setBinaryArchives() only exists on the descriptor-based overload.
+    MTL::ComputePipelineDescriptor* descriptor =
+        MTL::ComputePipelineDescriptor::alloc()->init()->autorelease();
+    descriptor->setComputeFunction(function);
+    if (archive) {
+        descriptor->setBinaryArchives(NS::Array::array(archive));
+    }
+
     // Binding reflection backs the host-side launch validation in add().
     MTL::ComputePipelineReflection* reflection = nullptr;
-    pipeline_ = device->newComputePipelineState(function, MTL::PipelineOptionBindingInfo,
+    pipeline_ = device->newComputePipelineState(descriptor, MTL::PipelineOptionBindingInfo,
                                                 &reflection, &error);
     function->release();
     if (!pipeline_) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
         throw std::runtime_error("failed to build compute pipeline: " + message);
+    }
+    if (archive) {
+        // Not fatal: the pipeline above already built fine either way.
+        NS::Error* stage_error = nullptr;
+        archive->addComputePipelineFunctions(descriptor, &stage_error);
     }
     if (reflection) {
         NS::Array* bindings = reflection->bindings();
