@@ -864,29 +864,48 @@ def test_chained_df_add_matches_float64_running_sum():
     assert rel_err <= 2**-36
 
 
-@pytest.mark.parametrize("math_mode", list(mr.MathMode))
-@pytest.mark.parametrize("routine", ["df_add", "df_mul"])
-def test_math_mode_behavior_is_pinned_per_routine(routine, math_mode):
-    """Whether df_add/df_mul survive a given MathMode is a property of how each
-    routine's error term is written (expression tree vs fma()), not a suite-wide
-    constant, so pin it explicitly per (routine, math_mode) pair rather than
-    assuming it follows step 1's EFTs.
-
-    In practice both routines live in the same prelude file as the guarded
-    `#error` from step 6, so every routine is rejected outside SAFE. That is
-    itself the property worth pinning here, rather than assuming it from step
-    1's EFT-level table.
-
-    As df_div/df_sqrt (step 7, stretch) are added, extend this table rather than
-    writing a new ad hoc FAST-math test per routine.
+def _assert_math_mode_pinned(call, math_mode):
+    """Shared body for the math-mode-per-routine tests below: SAFE must run
+    and produce finite output, anything else must hit the step-6 guard.
     """
-    a_pairs, b_pairs, _, _ = _random_df32_operands(8, np.random.default_rng(0))
     if math_mode is MathMode.SAFE:
-        out = _df32_binop(routine, a_pairs, b_pairs, math_mode)
-        assert np.all(np.isfinite(out))
+        assert np.all(np.isfinite(call()))
     else:
         with pytest.raises(mr.CompileError, match="SAFE"):
-            _df32_binop(routine, a_pairs, b_pairs, math_mode)
+            call()
+
+
+@pytest.mark.parametrize("math_mode", list(mr.MathMode))
+@pytest.mark.parametrize("routine", ["df_add", "df_mul", "df_div"])
+def test_math_mode_behavior_is_pinned_per_routine(routine, math_mode):
+    """Whether df_add/df_mul/df_div survive a given MathMode is a property of
+    how each routine's error term is written, not a suite-wide constant, so pin
+    it per (routine, math_mode) pair rather than assuming it from step 1's EFTs.
+
+    All three share the same prelude-wide `#error` guard, so every routine is
+    rejected outside SAFE regardless. See test_sqrt_math_mode_behavior_is_pinned
+    for the unary case (df_sqrt).
+    """
+    a_pairs, b_pairs, _, _ = _random_df32_operands(
+        8, np.random.default_rng(0), **MUL_SAFE_EXP_RANGE
+    )
+    _assert_math_mode_pinned(
+        lambda: _df32_binop(routine, a_pairs, b_pairs, math_mode), math_mode
+    )
+
+
+@pytest.mark.parametrize("math_mode", list(mr.MathMode))
+def test_sqrt_math_mode_behavior_is_pinned(math_mode):
+    """Unary counterpart to test_math_mode_behavior_is_pinned_per_routine:
+    df_sqrt only takes one operand, so it doesn't fit `_df32_binop`.
+    """
+    a_pairs, _, _, _ = _random_df32_operands(
+        8, np.random.default_rng(0), **MUL_SAFE_EXP_RANGE
+    )
+    a_pairs = np.abs(a_pairs)
+    _assert_math_mode_pinned(
+        lambda: _df32_unop("df_sqrt", a_pairs, math_mode), math_mode
+    )
 
 
 # --- Step 6 -- Make the math-mode requirement unmissable --------------------
@@ -921,3 +940,62 @@ def test_df32_safe_kernel_helper_pins_math_mode():
     # step 6 guard if it isn't SAFE.
     with pytest.raises(mr.CompileError, match="SAFE"):
         df32.kernel("kernel void noop() {}", "noop", math_mode=MathMode.FAST)
+
+
+# --- Step 7 (stretch) -- df_div, df_sqrt -------------------------------------
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_div_matches_float64_reference_under_safe_math():
+    """max relative error of df_div vs a float64 `/` reference must be <= 2**-40
+    over ~10k random operand pairs, under MathMode.SAFE.
+
+    df_div is iterative refinement, not a fixed-shape EFT composition like
+    df_add/df_mul, but it has to clear the same bound.
+    """
+    a_pairs, b_pairs, a64, b64 = _random_df32_operands(
+        10_000, np.random.default_rng(42), **MUL_SAFE_EXP_RANGE
+    )
+    out = _df32_binop("df_div", a_pairs, b_pairs, MathMode.SAFE)
+    assert _max_rel_err(out, a64 / b64) <= 2**-40
+    _assert_no_overlap(out)
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_sqrt_matches_float64_reference_under_safe_math():
+    """max relative error of df_sqrt vs a float64 `sqrt` reference must be
+    <= 2**-40 over ~10k random positive operands, under MathMode.SAFE.
+    """
+    a64 = np.abs(
+        _random_float64(10_000, np.random.default_rng(42), **MUL_SAFE_EXP_RANGE)
+    )
+    a_pairs = df32.split(a64)
+    out = _df32_unop("df_sqrt", a_pairs)
+    assert _max_rel_err(out, np.sqrt(a64)) <= 2**-40
+    _assert_no_overlap(out)
+
+
+def test_df_sqrt_handles_zero_and_negative_inputs():
+    """sqrt(0) must be exactly 0 with sign preserved, and sqrt of a negative
+    input must produce NaN rather than crash. df_sqrt's `a.hi <= 0` branch
+    exists for this: the general path divides by `a.hi`, which is undefined at
+    exactly 0 rather than IEEE's well-defined answer.
+    """
+    x = np.array([0.0, -0.0, -4.0], dtype=np.float64)
+    pairs = df32.split(x)
+    out = _df32_unop("df_sqrt", pairs)
+    assert out[0, 0] == 0.0 and not np.signbit(out[0, 0])
+    assert out[1, 0] == 0.0 and np.signbit(out[1, 0])
+    assert np.isnan(out[2, 0])
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_div_by_near_zero_does_not_crash():
+    """Dividing by zero must produce inf or NaN, not crash or hang. df_div has
+    no special-casing for this, same stance as df_add/df_mul on inf/nan.
+    """
+    a64 = np.array([1.0, -1.0], dtype=np.float64)
+    b64 = np.array([0.0, -0.0], dtype=np.float64)
+    a_pairs, b_pairs = df32.split(a64), df32.split(b64)
+    out = _df32_binop("df_div", a_pairs, b_pairs, MathMode.SAFE)
+    assert np.all(np.isinf(out[:, 0]) | np.isnan(out[:, 0]))

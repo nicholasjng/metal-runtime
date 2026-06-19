@@ -71,6 +71,43 @@ inline df32 df_from_float(float x) { return df32{x, 0.0f}; }
 
 inline float df_to_float(df32 a) { return a.hi; }
 
+// Iterative refinement from a correctly-rounded float32 seed (SAFE math
+// guarantees x/y is correctly rounded): each residual gets its own quotient
+// term folded back in. One round already clears 2^-45; the second buys about
+// another bit of margin for the same shape of code (measured, not assumed).
+// q0/q1/q2 are strictly decreasing in magnitude by construction, so the
+// combine is quick_two_sum, not the general-ordering df_add.
+inline df32 df_div(df32 a, df32 b) {
+    float q0 = a.hi / b.hi;
+    df32 r = df_sub(a, df_mul(df_from_float(q0), b));
+
+    float q1 = df_to_float(r) / b.hi;
+    r = df_sub(r, df_mul(df_from_float(q1), b));
+
+    float q2 = df_to_float(r) / b.hi;
+
+    df32 t = quick_two_sum(q1, q2);
+    df32 s = quick_two_sum(q0, t.hi);
+    return quick_two_sum(s.hi, s.lo + t.lo);
+}
+
+// Karp's trick: a correctly-rounded rsqrt seed x gives a correctly-rounded
+// float32 sqrt ax = a.hi*x; the correction term is second-order, so it only
+// needs float32 precision, not a second full df32 division. The general path
+// divides by a.hi (inside rsqrt), which is 0*inf = NaN at exactly 0 rather
+// than IEEE's 0/-0/NaN for zero/negative -- the branch exists for that case,
+// not to avoid a crash.
+inline df32 df_sqrt(df32 a) {
+    if (a.hi <= 0.0f) {
+        return df32{sqrt(a.hi), 0.0f};
+    }
+    float x = rsqrt(a.hi);
+    float ax = a.hi * x;
+    df32 residual = df_sub(a, df_mul(df_from_float(ax), df_from_float(ax)));
+    float correction = df_to_float(residual) * (x * 0.5f);
+    return quick_two_sum(ax, correction);
+}
+
 // hi first, lo as tiebreak: valid only for non-overlapping pairs
 // (|lo| <= 0.5*ulp(hi)), which split()/df_add()/df_mul() always produce.
 // Not NaN-aware, same as the rest of this prelude.
