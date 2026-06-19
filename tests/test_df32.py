@@ -237,7 +237,7 @@ def test_join_rejects_non_pairs():
     (4, 3) array silently yields (4,), using columns 0 and 1 and dropping the third.
     """
     x = np.zeros(3, dtype=np.float32)
-    with pytest.raises(ValueError, match="must be an input of shape"):
+    with pytest.raises(ValueError, match="must be an array of shape"):
         df32.join(x)
 
 
@@ -263,7 +263,13 @@ def test_non_finite_passes_through_with_zero_lo(value):
     load-bearing here: computing the residual as inf - inf raises a
     RuntimeWarning, which this turns into a failure.
     """
-    raise NotImplementedError
+    x = np.array([value], dtype=np.float64)
+    pair = df32.split(x)
+    if np.isnan(value):
+        assert np.isnan(pair[0, 0])
+    else:
+        assert pair[0, 0] == value
+    assert pair[0, 1] == 0.0
 
 
 @pytest.mark.filterwarnings("error::RuntimeWarning")
@@ -275,7 +281,10 @@ def test_subnormals_degrade_but_do_not_crash(value, worst_rel):
     `worst_rel`. The deeper into the subnormal range, the fewer significand bits
     survive -- 1e-40 keeps roughly 18 of them, 1e-44 about two.
     """
-    raise NotImplementedError
+    x = np.array([value], dtype=np.float64)
+    rt = df32.join(df32.split(x))
+    rel_err = np.abs(rt - x) / np.abs(x)
+    assert 2**-47 < rel_err[0] < worst_rel
 
 
 @pytest.mark.filterwarnings("error::RuntimeWarning")
@@ -285,7 +294,8 @@ def test_split_is_idempotent():
     Once a value is representable as a df32 pair, a further round trip must not
     move it. This is the property chained df_add/df_mul leans on.
     """
-    raise NotImplementedError
+    x = _random_float64(N, np.random.default_rng(seed=42))
+    assert np.array_equal(df32.split(df32.join(df32.split(x))), df32.split(x))
 
 
 def test_gpu_round_trip_proves_the_memory_layout():
@@ -295,5 +305,254 @@ def test_gpu_round_trip_proves_the_memory_layout():
     two layouts coincide. Upload split output, run `df32_identity`, read it back,
     and require the bytes to be unchanged. Keep the element count a multiple of
     256 so the dispatch does not round the grid up past the buffer.
+    """
+    x = _random_float64(256, np.random.default_rng(seed=42))
+    pairs = df32.split(x)
+
+    kernel = mr.Kernel(_IDENTITY_SOURCE, "df32_identity")
+    src = mr.Buffer(pairs)
+    dst = mr.Buffer.zeros(pairs.shape, "float32")
+    mr.run(kernel, grid=len(x), buffers=[src, dst])
+
+    assert np.array_equal(dst.to_numpy(), pairs)
+
+
+DF32_BINOP_TEMPLATE = """
+kernel void k_{name}(device const df32* a   [[buffer(0)]],
+                     device const df32* b   [[buffer(1)]],
+                     device df32*       out [[buffer(2)]],
+                     uint tid [[thread_position_in_grid]]) {{
+    out[tid] = {name}(a[tid], b[tid]);
+}}
+"""
+
+
+def _df32_binop(name, a_pairs, b_pairs, math_mode):
+    """Run a df32(df32, df32) -> df32 kernel; return output pairs widened to float64.
+
+    Mirrors `_limbs()` from step 1, but the inputs and output are already df32
+    pairs rather than raw float32s -- `df_add`/`df_mul` operate on `(hi, lo)`,
+    not on scalars.
+    """
+    source = df32.PRELUDE + DF32_BINOP_TEMPLATE.format(name=name)
+    kernel = mr.Kernel(source, f"k_{name}", math_mode=math_mode)
+    out = mr.Buffer.zeros(a_pairs.shape, "float32")
+    mr.run(
+        kernel,
+        grid=len(a_pairs),
+        buffers=[mr.Buffer(a_pairs), mr.Buffer(b_pairs), out],
+    )
+    return out.to_numpy().astype(np.float64)
+
+
+def _random_df32_operands(n, rng, **kwargs):
+    """Two independent arrays of valid, non-overlapping df32 pairs, plus the
+    float64 values each one exactly represents.
+
+    Built from `_random_float64` + `split` rather than drawn as raw (hi, lo)
+    floats, so every operand already satisfies the non-overlap invariant
+    `test_limbs_do_not_overlap` pins -- df_add only needs to preserve that
+    property, not establish it.
+    """
+    a64 = _random_float64(n, rng, **kwargs)
+    b64 = _random_float64(n, rng, **kwargs)
+    return df32.split(a64), df32.split(b64), a64, b64
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_add_matches_float64_reference_under_safe_math():
+    """max relative error of df_add vs a float64 `+` reference must be <= 2**-46
+    over ~10k random operand pairs, under MathMode.SAFE.
+
+    This is the plan's stated "done when" bound for df_add -- looser than the
+    2**-47 split/join bound because df_add's own arithmetic adds a little
+    additional rounding on top of the operands' own representation error.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_add_output_limbs_do_not_overlap():
+    """The (hi, lo) pair df_add returns must itself satisfy |lo| <= 0.5*ulp(hi) --
+    the same invariant test_limbs_do_not_overlap pins for split.
+
+    This is the property that separates a correctly renormalized df_add from a
+    "sloppy" one that produces overlapping limbs -- both can look accurate on a
+    single application, but only the renormalized one survives being chained
+    (see the next test).
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_add_stays_accurate_when_chained():
+    """Summing a long chain of df32 values with repeated df_add calls must stay
+    within the same relative-error bound as a single df_add, compared against an
+    equivalent float64 running sum.
+
+    A df_add that skips renormalization can look fine applied once and still
+    quietly violate non-overlap -- an error that only compounds, and so only
+    shows up, once results get fed back in as operands. This is the test that
+    would catch that.
+    """
+    raise NotImplementedError
+
+
+def test_df_add_destroys_precision_under_fast_math():
+    """Same comparison as the SAFE-math test above, but compiled under
+    MathMode.FAST: the relative error should blow past the 2**-46 bound,
+    mirroring step 1's `test_fast_math_destroys_compensation` for the raw EFTs.
+
+    Whether this actually fails depends on how df_add's error term is written --
+    an expression tree reassociates away under FAST the same way two_sum's did,
+    an fma()-routed one might not. That's worth finding out, not assuming.
+    """
+    raise NotImplementedError
+
+
+# --- Step 4 -- df_mul -------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_mul_matches_float64_reference_under_safe_math():
+    """max relative error of df_mul vs a float64 `*` reference must be <= 2**-46
+    over ~10k random operand pairs, under MathMode.SAFE.
+
+    Same shape as df_add's exactness test, built on `two_prod` for the leading
+    term plus the cross terms rather than `two_sum` on the his/los.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_mul_output_limbs_do_not_overlap():
+    """The (hi, lo) pair df_mul returns must itself satisfy |lo| <= 0.5*ulp(hi).
+
+    Same invariant as df_add's, now on the composed two_prod + cross-term
+    result -- worth checking independently, since dropping the wrong cross term
+    (see the plan's note on which of the four is conventionally negligible)
+    could pass the accuracy test above while still overlapping.
+    """
+    raise NotImplementedError
+
+
+def test_df_mul_destroys_precision_under_fast_math():
+    """Same comparison as the SAFE-math test above, but compiled under
+    MathMode.FAST.
+
+    Step 1 measured that two_prod's own error term survives FAST, because it is
+    routed through fma() rather than an expression tree. df_mul's cross terms
+    are extra additions on top of that -- whether *those* survive FAST is a
+    separate question this test answers by measurement.
+    """
+    raise NotImplementedError
+
+
+# --- Step 5 -- Accuracy suite ------------------------------------------------
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_add_near_cancellation_stays_accurate():
+    """df_add(a, b) for b ~= -a (catastrophic cancellation in plain float32)
+    must still land within the same relative-error bound as the general case.
+
+    This is the adversarial input float32 arithmetic alone gets most visibly
+    wrong -- the whole point of carrying a `lo` limb is that the compensation
+    term survives where plain addition would cancel it away.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_add_and_df_mul_handle_wide_exponent_spread():
+    """Operands whose exponents differ far more than step 1's bounded band
+    (which existed only to keep the float64 *reference* exact) must still
+    round-trip through df_add/df_mul within the accuracy bound.
+
+    Step 1 bounded the spread so the test oracle stayed exact; that constraint
+    doesn't apply here since df32 arithmetic's correctness doesn't depend on
+    float64 exactly representing the answer, only on the relative-error
+    comparison being valid.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_mul_near_float32_range_limits():
+    """Operands close to float32's max magnitude must not silently overflow to
+    inf inside df_mul's cross-term arithmetic, and values close to the smallest
+    normal must not silently flush to zero.
+
+    df_mul composes several float32 multiplications and additions per output
+    element; each is a place range could be clipped that a single `a * b`
+    reference wouldn't reveal.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_df_add_and_df_mul_preserve_signed_zero():
+    """+0.0 and -0.0 operands must produce the sign IEEE 754 dictates for `+`
+    and `*` respectively, through both df_add and df_mul.
+
+    Direct analogue of `test_signed_zero_survives` from step 2, one level up:
+    split/join already had a signed-zero bug once in this arc: worth checking
+    it doesn't reappear at the arithmetic layer.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_chained_df_add_matches_float64_running_sum():
+    """Accumulating a long chain of df32 values via repeated df_add calls must
+    stay within the accuracy bound compared to an equivalent float64 running
+    sum -- not just the single-application bound already tested in step 3.
+
+    This is the test the plan calls out as the one that would catch a broken
+    non-overlap invariant: a df_add that skips renormalization can look
+    accurate applied once and still drift once its own output is fed back in
+    as the next operand.
+    """
+    raise NotImplementedError
+
+
+@pytest.mark.parametrize("math_mode", list(mr.MathMode))
+@pytest.mark.parametrize("routine", ["df_add", "df_mul"])
+def test_math_mode_behavior_is_pinned_per_routine(routine, math_mode):
+    """Whether df_add/df_mul survive a given MathMode is a property of how each
+    routine's error term is written (expression tree vs fma()), not a suite-wide
+    constant -- so pin it explicitly per (routine, math_mode) pair rather than
+    assuming it follows step 1's EFTs.
+
+    As df_div/df_sqrt (step 7, stretch) are added, extend this table rather than
+    writing a new ad hoc FAST-math test per routine.
+    """
+    raise NotImplementedError
+
+
+# --- Step 6 -- Make the math-mode requirement unmissable --------------------
+
+
+def test_prelude_rejects_non_safe_math_at_compile_time():
+    """Compiling df32.PRELUDE (plus any kernel using it) under MathMode.FAST or
+    MathMode.RELAXED must raise mr.CompileError, with a message that names the
+    fix (i.e. mentions SAFE math mode) rather than a bare compiler error.
+
+    This is the step whose whole justification is that `mr.Kernel(df32.PRELUDE
+    + my_source)` -- math_mode defaulting to FAST -- compiles, runs, and returns
+    silently wrong answers otherwise. A compile-time guard converts that into a
+    loud failure naming the fix.
+    """
+    raise NotImplementedError
+
+
+def test_df32_safe_kernel_helper_pins_math_mode():
+    """Whatever helper step 6 introduces for constructing a df32-safe kernel
+    (e.g. `df32.compile_options(...)` or a `df32.kernel(source, ...)` wrapper)
+    must produce SAFE math mode without the caller having to remember to pass
+    it explicitly.
+
+    Exact shape depends on which helper form gets picked; update this stub's
+    body to match once that's decided.
     """
     raise NotImplementedError

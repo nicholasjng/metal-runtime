@@ -36,6 +36,7 @@ def split(x: NDArray[np.float64]) -> NDArray[np.float32]:
     hi = x.astype(np.float32)
     hi64 = hi.astype(np.float64)
     lo = np.subtract(x, hi64, out=np.zeros_like(x), where=finite)
+    lo = np.where(lo == 0, np.copysign(lo, x), lo)
     return np.stack([hi, lo], axis=-1, dtype=np.float32)
 
 
