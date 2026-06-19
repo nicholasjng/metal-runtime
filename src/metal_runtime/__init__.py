@@ -1,5 +1,40 @@
-from metal_runtime._core import Buffer, CompileError, Kernel, device_name, run
+from metal_runtime._core import (
+    Batch,
+    Buffer,
+    CompileError,
+    DeviceError,
+    DispatchError,
+    FunctionNotFoundError,
+    Kernel,
+    MathMode,
+    clear_library_cache,
+    device_info,
+    device_name,
+    library_cache_limit,
+    library_cache_size,
+    run,
+    set_library_cache_limit,
+    supported_dtypes,
+)
 
-__all__ = ["Buffer", "CompileError", "Kernel", "__version__", "device_name", "run"]
+__all__ = [
+    "Batch",
+    "Buffer",
+    "CompileError",
+    "DeviceError",
+    "DispatchError",
+    "FunctionNotFoundError",
+    "Kernel",
+    "MathMode",
+    "__version__",
+    "clear_library_cache",
+    "device_info",
+    "device_name",
+    "library_cache_limit",
+    "library_cache_size",
+    "run",
+    "set_library_cache_limit",
+    "supported_dtypes",
+]
 
 __version__ = "0.1.0"
