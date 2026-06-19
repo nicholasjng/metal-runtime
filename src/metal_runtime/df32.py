@@ -3,11 +3,40 @@ import importlib.resources
 import numpy as np
 from numpy.typing import NDArray
 
+import metal_runtime as mr
+
 PRELUDE = (
     importlib.resources.files("metal_runtime")
     .joinpath("df32.metal")
     .read_text(encoding="utf-8")
 )
+
+
+def kernel(source: str, function_name: str, **kwargs) -> mr.Kernel:
+    """
+    Build an `mr.Kernel` from `source` with `PRELUDE` prepended and
+    `math_mode` pinned to `mr.MathMode.SAFE`.
+
+    `mr.Kernel` defaults to `MathMode.FAST`, which silently reassociates away
+    the compensation terms this prelude depends on. This helper exists so
+    that's not something a caller has to remember.
+
+    Parameters
+    ----------
+    source: str
+        The kernel source to append to `PRELUDE`.
+    function_name: str
+        The name of the kernel function to dispatch.
+    **kwargs
+        Forwarded to `mr.Kernel`. Passing `math_mode` explicitly is allowed,
+        but anything other than `SAFE` will fail to compile.
+
+    Returns
+    -------
+        A compiled `mr.Kernel` with `math_mode=mr.MathMode.SAFE` by default.
+    """
+    kwargs.setdefault("math_mode", mr.MathMode.SAFE)
+    return mr.Kernel(PRELUDE + source, function_name, **kwargs)
 
 
 def split(x: NDArray[np.float64]) -> NDArray[np.float32]:
