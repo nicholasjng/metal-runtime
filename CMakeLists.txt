@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.24)
 project(metal_runtime LANGUAGES CXX)
 
+# Everything below links Foundation/Metal/QuartzCore. Without this the failure
+# is a screenful of unresolved Objective-C symbols at link time rather than a
+# statement of the actual requirement.
+if(NOT APPLE)
+  message(FATAL_ERROR
+    "metal-runtime targets Apple platforms only: it builds against Metal, "
+    "which exists only on macOS/iOS.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -48,10 +57,14 @@ add_library(metal_runtime STATIC
   src/runtime.cpp
   src/metal.cpp
   src/buffer.cpp
+  src/dtype.cpp
   src/library.cpp
   src/dispatch.cpp)
 target_include_directories(metal_runtime PUBLIC src)   # so #include "runtime.h" resolves
 target_link_libraries(metal_runtime PUBLIC metal-cpp)
+# Linked into the _core shared module. Clang defaults to PIC on Darwin, so this
+# is belt-and-braces, but it keeps the requirement stated rather than inherited.
+set_target_properties(metal_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Proves the metal-cpp fetch and Objective-C bridge work, independent of Python.
 add_executable(metal_probe src/main.cpp)
@@ -61,7 +74,7 @@ target_link_libraries(metal_probe PRIVATE metal_runtime)
 # still configure and build metal_runtime + metal_probe. Only scikit-build-core's
 # build, pointed at the project .venv where nanobind is a build dependency,
 # needs the `_core` extension target.
-find_package(Python 3.10 COMPONENTS Interpreter Development.Module)
+find_package(Python 3.11 COMPONENTS Interpreter Development.Module)
 
 set(METAL_RUNTIME_HAVE_NANOBIND FALSE)
 if(Python_FOUND)

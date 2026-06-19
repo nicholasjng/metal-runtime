@@ -37,19 +37,25 @@ configure time. `metal_probe` prints the system GPU to prove the toolchain.
 - **Device / queue**: one `MTL::Device` + `MTL::CommandQueue`, held for the
   process.
 - **Buffers**: `MTL::Buffer` with `ResourceStorageModeShared`, host and GPU
-  share the bytes, zero-copy upload/readback for f32 arrays.
+  share the bytes. Upload copies once; readback is zero-copy, a NumPy view of
+  the same memory. Every dtype Metal can address, `float64` excepted.
 - **Library cache**: `MTL::Device::newLibrary(source, ...)` (the NVRTC
   equivalent) compiles MSL source strings at runtime, keyed by the source
-  string. No offline `metal`/`metallib` toolchain.
-- **Dispatch**: bind buffers, set threadgroup sizes, `commit` +
-  `waitUntilCompleted`.
+  string, bounded and LRU-evicted. No offline `metal`/`metallib` toolchain.
+- **Dispatch**: bind buffers and inline scalars, 1-3D grids, threadgroup
+  memory, `commit` + `waitUntilCompleted`, with the command buffer's status
+  checked afterwards. `Batch` amortizes the round-trip over several launches.
 
-Bound to Python with nanobind: `device_name()`, `Buffer(np.ndarray)` /
-`.to_numpy()`, `Kernel(msl_source, function_name)`, `run(kernel, grid_size,
-threadgroup_size, buffers)`. The whole contract a consumer needs: generate MSL
-text, hand it a `Kernel` and some `Buffer`s, get results back as NumPy.
-Implemented in `src/buffer.*`, `src/library.*`, `src/dispatch.*`,
-`src/bindings.cpp`; see `tests/test_runtime.py`.
+Bound to Python with nanobind: `device_name()` / `device_info()`,
+`Buffer(np.ndarray)` / `.zeros()` / `.to_numpy()`, `Kernel(msl_source,
+function_name)`, `run(kernel, grid, threadgroup, buffers, scalars,
+threadgroup_memory)`, and `Batch`. The whole contract a consumer needs:
+generate MSL text, hand it a `Kernel` and some `Buffer`s, get results back as
+NumPy. Implemented in `src/buffer.*`, `src/dtype.*`, `src/library.*`,
+`src/dispatch.*`, `src/bindings.cpp`; see `tests/test_runtime.py`.
+
+Not covered: `bfloat16` readback (NumPy has no such dtype, though the buffers
+dispatch fine), and asynchronous dispatch — `Batch` still blocks at the end.
 
 ## Where this fits
 

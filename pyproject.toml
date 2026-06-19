@@ -5,7 +5,7 @@ description = "Python bindings for Apple Metal"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Nicholas Junge", email = "nicho.junge@gmail.com" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.urls]
@@ -30,14 +30,12 @@ input = "src/metal_runtime/__init__.py"
 [dependency-groups]
 build = [
     "nanobind>=2.13.0",
+    "ruff>=0.16.0",  # for CMake's post-build stub formatting step.
     "scikit-build-core>=0.10",
 ]
 test = [
     "pytest>=8",
-]
-zed = [
-    "ruff>=0.15.12",
-    "ty>=0.0.34",
+    "ml-dtypes>=0.5", # to exercise the bfloat16 interop path, as NumPy can't represent that dtype.
 ]
 
 [tool.uv]
@@ -48,6 +46,9 @@ default-groups = ["build", "test", "zed"]
 
 [tool.ruff]
 extend-exclude = ["ext"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/metal_runtime/_core.pyi" = ["C408"]  # stubgen outputs array metadata with a dict(...) call
 
 [tool.ty.src]
 include = ["src", "tests"]
