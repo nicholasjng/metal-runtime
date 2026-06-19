@@ -13,7 +13,7 @@ Repository = "https://github.com/nicholasjng/metal-runtime"
 Issues = "https://github.com/nicholasjng/metal-runtime/issues"
 
 [build-system]
-requires = ["scikit-build-core>=0.10", "nanobind>=2.10"]
+requires = ["scikit-build-core>=1.0", "nanobind>=2.13"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -34,7 +34,7 @@ bench = [
 build = [
     "nanobind>=2.13.0",
     "ruff>=0.16.0",  # for CMake's post-build stub formatting step.
-    "scikit-build-core>=0.10",
+    "scikit-build-core>=1.0",
 ]
 test = [
     "pytest>=8",
@@ -58,3 +58,11 @@ extend-exclude = ["ext"]
 
 [tool.ty.src]
 include = ["src", "tests"]
+
+[[tool.ty.overrides]]
+# jax/mlx are stub-only annotations here (to_jax()/to_mlx()), not real deps of
+# this package; neither is installed, so their imports are unresolved by design.
+include = ["src/metal_runtime/_core.pyi"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"

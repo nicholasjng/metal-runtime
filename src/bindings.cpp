@@ -208,6 +208,14 @@ class PyBuffer {
                                       nb::find(*this), nullptr, to_dlpack(out));
     }
 
+    // JAX and MLX both consume a DLPack capsule directly (jax.dlpack.from_dlpack,
+    // mlx.core.array) without going through NumPy's dtype table, so they carry
+    // bfloat16 (and anything else DType supports) through untouched.
+    nb::ndarray<nb::jax> to_jax() { return as_ndarray<nb::jax>(); }
+    nb::ndarray<nb::mlx> to_mlx() { return as_ndarray<nb::mlx>(); }
+
+    nb::ndarray<> to_dlpack_ndarray() { return as_ndarray<>(); }
+
     Buffer* buffer() { return buffer_.get(); }
 
     const std::vector<size_t>& shape() const { return shape_; }
@@ -222,6 +230,12 @@ class PyBuffer {
     }
 
    private:
+    template <typename... Framework>
+    nb::ndarray<Framework...> as_ndarray() {
+        return nb::ndarray<Framework...>(buffer_->contents(), shape_.size(), shape_.data(),
+                                         nb::find(*this), nullptr, to_dlpack(dtype_));
+    }
+
     PyBuffer(std::vector<size_t> shape, DType dtype, bool zero_fill)
         : shape_(std::move(shape)),
           dtype_(dtype),
@@ -485,16 +499,15 @@ NB_MODULE(_core, m) {
         .def_static("empty", &PyBuffer::empty, "shape"_a, "dtype"_a = "float32")
         .def("copy_from", &PyBuffer::copy_from, "array"_a, "dtype"_a = nb::none())
         .def("to_numpy", &PyBuffer::to_numpy, "dtype"_a = nb::none())
+        .def("to_jax", &PyBuffer::to_jax, nb::sig("def to_jax(self) -> jax.Array"))
+        .def("to_mlx", &PyBuffer::to_mlx, nb::sig("def to_mlx(self) -> mlx.core.array"))
         .def(
             "__dlpack__",
-            [](PyBuffer& b, nb::kwargs kwargs) {
-                // Delegates to the numpy view: same memory and lifetime,
-                // and numpy speaks the full protocol.
-                nb::object view = nb::cast(b.to_numpy(std::nullopt));
-                nb::object dlpack = view.attr("__dlpack__");
-                PyObject* result = PyObject_Call(dlpack.ptr(), nb::tuple().ptr(), kwargs.ptr());
-                if (!result) throw nb::python_error();
-                return nb::steal(result);
+            [](PyBuffer& b, nb::kwargs) {
+                // nb::ndarray<> (no framework) casts directly to a raw DLPack capsule.
+                // Unlike routing through to_numpy(), this never consults NumPy's dtype
+                //  table, so bfloat16 (and anything else DType supports) exports fine.
+                return b.to_dlpack_ndarray();
             },
             nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"))
         .def("__dlpack_device__",
