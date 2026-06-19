@@ -52,6 +52,7 @@ def lib():
     handle.mr_compile_library.argtypes = [
         ctypes.c_char_p,
         ctypes.c_size_t,
+        ctypes.c_int,
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(ctypes.c_char_p),
     ]
@@ -97,12 +98,15 @@ MR_OK = 0
 MR_ERROR_COMPILE = 2
 MR_ERROR_FUNCTION_NOT_FOUND = 3
 
+# MRMathMode values from c_api.h.
+MR_MATH_MODE_FAST = 2
 
-def _compile(lib, source: bytes):
+
+def _compile(lib, source: bytes, math_mode: int = MR_MATH_MODE_FAST):
     err = ctypes.c_char_p()
     library = ctypes.c_void_p()
     status = lib.mr_compile_library(
-        source, len(source), ctypes.byref(library), ctypes.byref(err)
+        source, len(source), math_mode, ctypes.byref(library), ctypes.byref(err)
     )
     return status, library, err
 

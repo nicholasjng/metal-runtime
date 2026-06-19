@@ -28,12 +28,23 @@ typedef enum MRStatus {
     MR_ERROR_UNKNOWN = 6,
 } MRStatus;
 
+// Mirrors library.h's MathMode. Metal's default (FAST) permits reassociation,
+// which deletes compensated-arithmetic error terms (df32);
+// SAFE is required for those.
+typedef enum MRMathMode {
+    MR_MATH_MODE_SAFE = 0,
+    MR_MATH_MODE_RELAXED = 1,
+    MR_MATH_MODE_FAST = 2,
+} MRMathMode;
+
 // No-op on NULL. *out_err_msg is untouched on success everywhere below.
 void mr_free_error_message(char* msg);
 
-// Compiles MSL source. Call once at registration time.
-MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len, MRLibrary** out_library,
-                            char** out_err_msg);
+// Compiles MSL source. Call once at registration time. Part of the
+// library identity: the same source under a different math_mode is a
+// different library, matching library.h's own CompileOptions contract.
+MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len, MRMathMode math_mode,
+                            MRLibrary** out_library, char** out_err_msg);
 void mr_release_library(MRLibrary* library);
 
 // Builds (and caches) the named kernel's pipeline.

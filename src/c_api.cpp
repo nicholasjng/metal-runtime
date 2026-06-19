@@ -101,12 +101,26 @@ bool region_is_mapped_rw(void* start, size_t length) {
 
 void mr_free_error_message(char* msg) { std::free(msg); }
 
-MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len, MRLibrary** out_library,
-                            char** out_err_msg) {
+MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len, MRMathMode math_mode,
+                            MRLibrary** out_library, char** out_err_msg) {
     if (out_library) *out_library = nullptr;
     return mr_guard(out_err_msg, [&] {
-        auto* lib =
-            new MRLibrary{Library(runtime().device(), std::string(msl_source, msl_source_len))};
+        CompileOptions options;
+        switch (math_mode) {
+            case MR_MATH_MODE_SAFE:
+                options.math_mode = MathMode::Safe;
+                break;
+            case MR_MATH_MODE_RELAXED:
+                options.math_mode = MathMode::Relaxed;
+                break;
+            case MR_MATH_MODE_FAST:
+                options.math_mode = MathMode::Fast;
+                break;
+            default:
+                throw std::invalid_argument("mr_compile_library: unknown math_mode");
+        }
+        auto* lib = new MRLibrary{
+            Library(runtime().device(), std::string(msl_source, msl_source_len), options)};
         *out_library = lib;
     });
 }
