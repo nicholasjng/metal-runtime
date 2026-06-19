@@ -13,22 +13,22 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Emit compile_commands.json for clangd / IDE LSPs. Also force-set here in
-# case the project is built without scikit-build-core (e.g. raw `cmake -B`).
+# Generate a compilation database for each build tree. Developer builds can
+# copy theirs to the repository root without letting isolated package builds
+# replace it with paths from a temporary environment.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
-
-# The file lands in ${CMAKE_BINARY_DIR}; with build-dir = "build/{wheel_tag}"
-# in pyproject.toml that path varies per ABI, so clangd's auto-discovery
-# (which probes ./build/ and the source root) won't find it. Symlink it to
-# the source root so IDE tooling picks it up without configuration.
-add_custom_target(
-  symlink_compile_commands ALL
-  COMMAND ${CMAKE_COMMAND} -E create_symlink
-      ${CMAKE_BINARY_DIR}/compile_commands.json
-      ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
-  BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
-  COMMENT "Symlinking compile_commands.json to source root"
-  VERBATIM)
+option(METAL_RUNTIME_SYNC_COMPILE_COMMANDS
+  "Copy compile_commands.json to the source root" OFF)
+if(PROJECT_IS_TOP_LEVEL AND METAL_RUNTIME_SYNC_COMPILE_COMMANDS)
+  add_custom_target(
+    sync_compile_commands ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_BINARY_DIR}/compile_commands.json
+        ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
+    BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
+    COMMENT "Syncing compile_commands.json to source root"
+    VERBATIM)
+endif()
 
 # Apple's official metal-cpp, fetched at configure time. Header-only:
 # Foundation / Metal / QuartzCore, no MPS. Bump the version by changing the URL.
@@ -109,18 +109,20 @@ if(METAL_RUNTIME_HAVE_NANOBIND)
 
   install(TARGETS _core LIBRARY DESTINATION metal_runtime)
 
-  # Written into the src/-layout, not a build dir, so it shadows site-packages
-  # and IDEs/type checkers pick it up for `metal_runtime._core`.
+  # Generate in the build tree; explicit targets update or verify the source stub.
+  set(_METAL_RUNTIME_CORE_STUB "${CMAKE_CURRENT_BINARY_DIR}/_core.pyi")
   nanobind_add_stub(
     _core_stub
     MODULE _core
-    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/src/metal_runtime/_core.pyi
+    OUTPUT ${_METAL_RUNTIME_CORE_STUB}
     PYTHON_PATH $<TARGET_FILE_DIR:_core>
     DEPENDS _core
   )
 
-  # Run `ruff format`/`check --fix` on the freshly-generated stub.
-  # Skipped if ruff isn't available (e.g. building from an sdist without dev extras).
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/metal_runtime/_core.pyi
+    DESTINATION metal_runtime)
+
+  # Format generated stubs when Ruff is available.
   execute_process(
     COMMAND ${Python_EXECUTABLE} -m ruff --version
     RESULT_VARIABLE _ruff_available
@@ -130,13 +132,31 @@ if(METAL_RUNTIME_HAVE_NANOBIND)
     add_custom_command(
       TARGET _core_stub POST_BUILD
       COMMAND ${Python_EXECUTABLE} -m ruff check --fix --exit-zero --quiet
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/metal_runtime/_core.pyi
+        ${_METAL_RUNTIME_CORE_STUB}
       COMMAND ${Python_EXECUTABLE} -m ruff format --quiet
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/metal_runtime/_core.pyi
+        ${_METAL_RUNTIME_CORE_STUB}
       COMMENT "ruff fix + format _core.pyi"
       VERBATIM
     )
   endif()
+
+  add_custom_target(
+    update_metal_runtime_core_stub
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${_METAL_RUNTIME_CORE_STUB}
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/metal_runtime/_core.pyi
+    DEPENDS _core_stub
+    COMMENT "Updating checked-in src/metal_runtime/_core.pyi"
+    VERBATIM)
+
+  add_custom_target(
+    check_metal_runtime_core_stub
+    COMMAND ${CMAKE_COMMAND} -E compare_files
+      ${_METAL_RUNTIME_CORE_STUB}
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/metal_runtime/_core.pyi
+    DEPENDS _core_stub
+    COMMENT "Checking checked-in src/metal_runtime/_core.pyi"
+    VERBATIM)
 else()
   message(STATUS "nanobind not found for ${Python_EXECUTABLE} -- skipping the "
                   "_core Python extension target (metal_runtime still builds). "

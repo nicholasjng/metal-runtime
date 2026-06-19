@@ -122,6 +122,21 @@ Apple Silicon is the tested target. Older GPUs without non-uniform
 threadgroup support fall back to a dispatch path requiring `grid` to divide
 evenly by `threadgroup`.
 
+## Development
+
+Package builds use standard build isolation. Configure a stable compilation
+database for clangd after installing the development dependencies:
+
+```console
+$ uv sync
+$ uv run --no-sync python scripts/configure-clangd.py
+```
+
+The database is copied from `build/clangd` to the repository root and refers
+to nanobind in the project environment. Use the
+`update_metal_runtime_core_stub` or `check_metal_runtime_core_stub` target in
+that build tree after changing the native API.
+
 ## License
 
 This project is licensed under the Apache-2.0 license.

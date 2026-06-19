@@ -45,9 +45,6 @@ typing = [
 ]
 
 [tool.uv]
-# Build against the project .venv so includes from Python packages
-# (nanobind etc.) in compile_commands.json survive across rebuilds.
-no-build-isolation-package = ["metal-runtime"]
 default-groups = ["bench", "build", "test", "typing"]
 
 [tool.ruff]
