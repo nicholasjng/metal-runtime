@@ -21,10 +21,10 @@ add_custom_target(
   COMMENT "Symlinking compile_commands.json to source root"
   VERBATIM)
 
-# Apple's official metal-cpp, fetched at configure time (replaces the old
-# download_metal_cpp.py). Header-only: Foundation / Metal / QuartzCore, no MPS.
-# Bump the version by changing the URL; the archive nests under metal-cpp/ on
-# some releases, so handle either layout.
+# Apple's official metal-cpp, fetched at configure time. Header-only:
+# Foundation / Metal / QuartzCore, no MPS. Bump the version by changing the
+# URL; the archive nests under metal-cpp/ on some releases, so handle either
+# layout.
 include(FetchContent)
 FetchContent_Declare(
   metalcpp
@@ -37,16 +37,13 @@ else()
   set(METAL_CPP_INCLUDE "${metalcpp_SOURCE_DIR}/metal-cpp")
 endif()
 
-# metal-cpp is header-only; the implementation is generated in exactly one TU via
-# the NS_/MTL_/CA_PRIVATE_IMPLEMENTATION macros (see src/metal_probe.cpp).
+# metal-cpp is header-only; the implementation is generated in exactly one TU
+# via the NS_/MTL_/CA_PRIVATE_IMPLEMENTATION macros (see src/metal.cpp).
 add_library(metal-cpp INTERFACE)
 target_include_directories(metal-cpp INTERFACE "${METAL_CPP_INCLUDE}")
 target_link_libraries(metal-cpp INTERFACE
   "-framework Foundation" "-framework Metal" "-framework QuartzCore")
 
-# Smoke test: print the system default GPU. Proves the metal-cpp fetch + the
-# Objective-C runtime bridge work. The runtime core + nanobind bindings build on
-# top of the metal-cpp target — see ROADMAP.md.
 add_library(metal_runtime STATIC
   src/runtime.cpp
   src/metal.cpp
@@ -56,15 +53,14 @@ add_library(metal_runtime STATIC
 target_include_directories(metal_runtime PUBLIC src)   # so #include "runtime.h" resolves
 target_link_libraries(metal_runtime PUBLIC metal-cpp)
 
+# Proves the metal-cpp fetch and Objective-C bridge work, independent of Python.
 add_executable(metal_probe src/main.cpp)
 target_link_libraries(metal_probe PRIVATE metal_runtime)
 
-# --- Python + nanobind ---------------------------------------------------------
-# Optional: a plain `cmake -S . -B build` (system Python, no nanobind installed --
-# e.g. clangd's compile_commands.json, or metal_probe-only development) should
+# A plain `cmake -S . -B build` (system Python, no nanobind installed) should
 # still configure and build metal_runtime + metal_probe. Only scikit-build-core's
-# build (which points Python_EXECUTABLE at the project .venv, where nanobind is a
-# build-time dependency) actually needs the `_core` extension target.
+# build, pointed at the project .venv where nanobind is a build dependency,
+# needs the `_core` extension target.
 find_package(Python 3.10 COMPONENTS Interpreter Development.Module)
 
 set(METAL_RUNTIME_HAVE_NANOBIND FALSE)
@@ -95,8 +91,8 @@ if(METAL_RUNTIME_HAVE_NANOBIND)
 
   install(TARGETS _core LIBRARY DESTINATION metal_runtime)
 
-  # Emit the .pyi stub next to the Python sources so IDEs and type checkers pick
-  # it up via the src/-layout (which shadows site-packages for `metal_runtime._core`).
+  # Written into the src/-layout, not a build dir, so it shadows site-packages
+  # and IDEs/type checkers pick it up for `metal_runtime._core`.
   nanobind_add_stub(
     _core_stub
     MODULE _core

@@ -3,8 +3,8 @@
 A small, LLVM-free Metal GPU runtime for Python, built on Apple's
 [metal-cpp](https://developer.apple.com/metal/cpp/). Compiles MSL kernel source
 at runtime (no offline `metal`/`metallib` toolchain), moves NumPy `float32`
-arrays into shared GPU buffers with zero-copy readback, and dispatches — no MLIR,
-no XLA.
+arrays into shared GPU buffers with zero-copy readback, and dispatches. No
+MLIR, no XLA.
 
 ```python
 import numpy as np
@@ -50,8 +50,8 @@ A PyPI release is planned for the future.
 
 ## Project direction
 
-This repo's goal — running JAX programs on the Apple GPU without building
-MLIR/StableHLO from source — is laid out in [ROADMAP.md](ROADMAP.md).
+This repo's goal, running JAX programs on the Apple GPU without building
+MLIR/StableHLO from source, is laid out in [ROADMAP.md](ROADMAP.md).
 
 ## License
 
