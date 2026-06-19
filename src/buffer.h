@@ -12,11 +12,14 @@ class Buffer {
    public:
     Buffer(MTL::Device* device, size_t size_bytes);
     ~Buffer();
-    Buffer(Buffer&& other);
+    Buffer(Buffer&& other) noexcept;
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
 
     void* contents() const;
+
+    // The requested size, which for an empty buffer is 0 even though the
+    // underlying allocation isn't -- see the constructor.
     size_t size() const { return size_; }
     MTL::Buffer* handle() const { return buffer_; }
 

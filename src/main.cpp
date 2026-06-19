@@ -4,25 +4,23 @@
 //   cmake -S . -B build -G Ninja && cmake --build build
 //   ./build/metal_probe   ->   Metal device: Apple M1 Pro
 #include <cstdio>
+#include <exception>
 
-#include "metal.h"
 #include "runtime.h"
 
 int main() {
-    MetalRuntime* rt = &runtime();
-    if (!rt->device()) {
-        std::fprintf(stderr, "no Metal device found\n");
+    try {
+        MetalRuntime& rt = runtime();
+        std::printf("Metal device: %s\n", rt.device_name().c_str());
+        std::printf("Device command queue alive at %p\n", (void*)rt.queue());
+        std::printf("Unified memory: %s\n", rt.has_unified_memory() ? "yes" : "no");
+        std::printf("Max threads per threadgroup: %zu\n", rt.max_threads_per_threadgroup());
+        std::printf("Non-uniform threadgroups: %s\n",
+                    rt.supports_non_uniform_threadgroups() ? "yes" : "no");
+        std::printf("same instance: %s\n", &rt == &runtime() ? "yes" : "no");
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "%s\n", e.what());
         return 1;
     }
-    if (!rt->queue()) {
-        std::fprintf(stderr, "could not create command queue\n");
-        return 1;
-    }
-
-    std::printf("Metal device: %s\n", rt->device()->name()->utf8String());
-    std::printf("Device command queue alive at %p\n", (void*)rt->queue());
-
-    MetalRuntime* rt2 = &runtime();
-    std::printf("same instance: %s\n", rt == rt2 ? "yes" : "no");
-    return 0;
 }
