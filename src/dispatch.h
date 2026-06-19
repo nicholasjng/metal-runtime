@@ -1,8 +1,10 @@
 #pragma once
 #include <cstddef>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -66,11 +68,20 @@ class ComputePipeline {
     // kernel's own ceiling -- what dispatch() picks when the caller doesn't.
     Dim3 default_threadgroup(Dim3 grid) const;
 
+    // Validates binding counts, threadgroup dims, and threadgroup memory
+    // budget; not buffer identities or grid size, so a stepping loop
+    // relaunching the same kernel at the same shape can cache the result.
+    void validate_shape(size_t binding_count, const std::vector<size_t>& threadgroup_memory,
+                        Dim3 threadgroup, size_t device_max_threadgroup_memory);
+
    private:
     MTL::ComputePipelineState* pipeline_ = nullptr;
     std::string label_;
     std::vector<BindingInfo> buffer_bindings_;
     std::vector<BindingInfo> threadgroup_bindings_;
+
+    std::mutex shape_cache_mutex_;
+    std::unordered_set<std::string> validated_shapes_;
 };
 
 // One kernel launch. Buffers bind at indices 0..n-1, each at a byte offset
