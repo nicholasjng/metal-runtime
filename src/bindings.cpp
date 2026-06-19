@@ -492,32 +492,194 @@ NB_MODULE(_core, m) {
         nb::exception<MSLFunctionNotFoundError>(m, "FunctionNotFoundError", compile_error);
     [[maybe_unused]] nb::object dispatch_error = nb::exception<DispatchError>(m, "DispatchError");
 
-    m.def("device_name", []() { return runtime().device_name(); });
-    m.def("device_info", &device_info);
-    m.def("supported_dtypes", &supported_dtype_names);
+    m.def(
+        "device_name", []() { return runtime().device_name(); },
+        R"doc(
+Name of the default Metal device.
 
-    m.def("library_cache_size", []() { return runtime().library_cache_size(); });
-    m.def("library_cache_limit", []() { return runtime().library_cache_limit(); });
+Returns
+-------
+str
+)doc");
+    m.def("device_info", &device_info,
+          R"doc(
+Device capabilities and limits.
+
+Returns
+-------
+dict
+    Keys: name, unified_memory, recommended_max_working_set_size,
+    max_threads_per_threadgroup, max_threadgroup_memory_length,
+    max_buffer_length, supports_non_uniform_threadgroups.
+)doc");
+    m.def("supported_dtypes", &supported_dtype_names,
+          R"doc(
+Comma-separated list of dtype names Buffer accepts.
+
+Returns
+-------
+str
+)doc");
+
+    m.def(
+        "library_cache_size", []() { return runtime().library_cache_size(); },
+        R"doc(
+Number of compiled MSL libraries currently cached.
+
+Returns
+-------
+int
+)doc");
+    m.def(
+        "library_cache_limit", []() { return runtime().library_cache_limit(); },
+        R"doc(
+Current cap on cached libraries.
+
+Returns
+-------
+int
+    0 means unlimited.
+)doc");
     m.def(
         "set_library_cache_limit", [](size_t limit) { runtime().set_library_cache_limit(limit); },
-        "limit"_a);
-    m.def("clear_library_cache", []() { runtime().clear_library_cache(); });
+        "limit"_a,
+        R"doc(
+Cap the library cache size, evicting least-recently-used entries.
+
+Parameters
+----------
+limit : int
+    0 disables eviction.
+)doc");
+    m.def(
+        "clear_library_cache", []() { runtime().clear_library_cache(); },
+        "Drop every cached library.");
 
     m.def(
         "set_pipeline_cache_dir",
-        [](std::optional<std::string> path) { runtime().set_pipeline_cache_dir(path); }, "path"_a);
-    m.def("pipeline_cache_dir", []() { return runtime().pipeline_cache_dir(); });
-    m.def("save_pipeline_cache", []() { runtime().save_pipeline_cache(); });
+        [](std::optional<std::string> path) { runtime().set_pipeline_cache_dir(path); }, "path"_a,
+        R"doc(
+Enable or disable the persistent pipeline cache.
+
+Parameters
+----------
+path : str or None
+    Loads an existing archive at this path if one exists, else starts
+    an empty one. None turns caching back off. Call once at startup,
+    not concurrently with kernel construction.
+)doc");
+    m.def(
+        "pipeline_cache_dir", []() { return runtime().pipeline_cache_dir(); },
+        R"doc(
+Path of the active pipeline cache, if one is configured.
+
+Returns
+-------
+str or None
+)doc");
+    m.def(
+        "save_pipeline_cache", []() { runtime().save_pipeline_cache(); },
+        R"doc(
+Write the pipeline cache to its configured path.
+
+Raises
+------
+RuntimeError
+    No pipeline cache directory is set.
+)doc");
 
     nb::class_<PyBuffer>(m, "Buffer")
         .def(nb::init<HostArray, const std::optional<std::string>&>(), "array"_a,
-             "dtype"_a = nb::none())
-        .def_static("zeros", &PyBuffer::zeros, "shape"_a, "dtype"_a = "float32")
-        .def_static("empty", &PyBuffer::empty, "shape"_a, "dtype"_a = "float32")
-        .def("copy_from", &PyBuffer::copy_from, "array"_a, "dtype"_a = nb::none())
-        .def("to_numpy", &PyBuffer::to_numpy, "dtype"_a = nb::none())
-        .def("to_jax", &PyBuffer::to_jax, nb::sig("def to_jax(self) -> jax.Array"))
-        .def("to_mlx", &PyBuffer::to_mlx, nb::sig("def to_mlx(self) -> mlx.core.array"))
+             "dtype"_a = nb::none(),
+             R"doc(
+Upload a NumPy array into a new device buffer.
+
+Parameters
+----------
+array : numpy.ndarray
+    C-contiguous, any dtype Metal can address; float64 is rejected.
+dtype : str, optional
+    Relabels the array's bytes rather than converting them (`.view`
+    semantics). Element width must match.
+)doc")
+        .def_static("zeros", &PyBuffer::zeros, "shape"_a, "dtype"_a = "float32",
+                    R"doc(
+Allocate a zero-filled buffer without an upload.
+
+Parameters
+----------
+shape : Sequence[int]
+dtype : str, optional
+    Defaults to "float32".
+
+Returns
+-------
+Buffer
+)doc")
+        .def_static("empty", &PyBuffer::empty, "shape"_a, "dtype"_a = "float32",
+                    R"doc(
+Allocate an uninitialized buffer: no upload, no zero-fill.
+
+Parameters
+----------
+shape : Sequence[int]
+dtype : str, optional
+    Defaults to "float32".
+
+Returns
+-------
+Buffer
+)doc")
+        .def("copy_from", &PyBuffer::copy_from, "array"_a, "dtype"_a = nb::none(),
+             R"doc(
+Refill this buffer's allocation in place.
+
+Parameters
+----------
+array : numpy.ndarray
+    Byte count must match this buffer's; shape may differ.
+dtype : str, optional
+    Relabels rather than converts, like the constructor.
+
+Raises
+------
+ValueError
+    Byte count or resolved dtype doesn't match this buffer.
+)doc")
+        .def("to_numpy", &PyBuffer::to_numpy, "dtype"_a = nb::none(),
+             R"doc(
+A live NumPy view of this buffer's memory. Not a copy.
+
+Parameters
+----------
+dtype : str, optional
+    Relabels the bytes on the way out; element width must match.
+
+Returns
+-------
+numpy.ndarray
+
+Raises
+------
+TypeError
+    dtype is bfloat16, which NumPy has no native dtype for.
+)doc")
+        .def("to_jax", &PyBuffer::to_jax, nb::sig("def to_jax(self) -> jax.Array"),
+             R"doc(
+This buffer as a JAX array, via DLPack. Zero-copy.
+
+Returns
+-------
+jax.Array
+)doc")
+        .def("to_mlx", &PyBuffer::to_mlx, nb::sig("def to_mlx(self) -> mlx.core.array"),
+             R"doc(
+This buffer as an MLX array, via DLPack. Zero-copy.
+
+Returns
+-------
+mlx.core.array
+)doc")
         .def(
             "__dlpack__",
             [](PyBuffer& b, nb::kwargs) {
@@ -526,24 +688,32 @@ NB_MODULE(_core, m) {
                 //  table, so bfloat16 (and anything else DType supports) exports fine.
                 return b.to_dlpack_ndarray();
             },
-            nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"))
-        .def("__dlpack_device__",
-             // (kDLCPU, 0): unified memory, so the bytes are host-addressable.
-             [](PyBuffer&) { return nb::make_tuple(1, 0); })
-        .def_prop_ro("shape",
-                     [](const PyBuffer& b) {
-                         nb::list dims;
-                         for (size_t d : b.shape()) dims.append(d);
-                         return nb::tuple(dims);
-                     })
-        .def_prop_ro("dtype", &PyBuffer::dtype)
-        .def_prop_ro("size", &PyBuffer::size)
-        .def_prop_ro("nbytes", &PyBuffer::nbytes)
-        .def("__len__",
-             [](const PyBuffer& b) {
-                 if (b.shape().empty()) throw nb::type_error("len() of unsized object");
-                 return b.shape()[0];
-             })
+            nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"),
+            "DLPack capsule for this buffer's memory. Zero-copy.")
+        .def(
+            "__dlpack_device__",
+            // (kDLCPU, 0): unified memory, so the bytes are host-addressable.
+            [](PyBuffer&) { return nb::make_tuple(1, 0); },
+            "DLPack device tuple: (kDLCPU, 0), since Metal's shared storage is "
+            "host-addressable.")
+        .def_prop_ro(
+            "shape",
+            [](const PyBuffer& b) {
+                nb::list dims;
+                for (size_t d : b.shape()) dims.append(d);
+                return nb::tuple(dims);
+            },
+            "Array shape.")
+        .def_prop_ro("dtype", &PyBuffer::dtype, "dtype name, e.g. 'float32'.")
+        .def_prop_ro("size", &PyBuffer::size, "Element count.")
+        .def_prop_ro("nbytes", &PyBuffer::nbytes, "Byte count.")
+        .def(
+            "__len__",
+            [](const PyBuffer& b) {
+                if (b.shape().empty()) throw nb::type_error("len() of unsized object");
+                return b.shape()[0];
+            },
+            "Length of the first dimension.")
         .def("__repr__", [](const PyBuffer& b) {
             std::string out = "Buffer(shape=(";
             for (size_t i = 0; i < b.shape().size(); ++i) {
@@ -574,38 +744,125 @@ NB_MODULE(_core, m) {
         .def(nb::init<const std::string&, const std::string&, MathMode,
                       const std::map<std::string, std::string>&, const nb::dict&>(),
              "msl_source"_a, "function_name"_a, "math_mode"_a = MathMode::Fast,
-             "defines"_a = std::map<std::string, std::string>(), "constants"_a = nb::dict())
-        .def_prop_ro("function_name", &PyKernel::function_name)
-        .def_prop_ro("math_mode", &PyKernel::math_mode)
-        .def_prop_ro("defines", &PyKernel::defines)
-        .def_prop_ro("constants", &PyKernel::constants)
-        .def_prop_ro("max_threads_per_threadgroup",
-                     [](PyKernel& k) { return k.pipeline().max_threads_per_threadgroup(); })
-        .def_prop_ro("thread_execution_width",
-                     [](PyKernel& k) { return k.pipeline().thread_execution_width(); })
-        .def_prop_ro("static_threadgroup_memory_length",
-                     [](PyKernel& k) { return k.pipeline().static_threadgroup_memory_length(); })
+             "defines"_a = std::map<std::string, std::string>(), "constants"_a = nb::dict(),
+             R"doc(
+Compile MSL source into a dispatchable kernel.
+
+Parameters
+----------
+msl_source : str
+function_name : str
+    Entry point within `msl_source`.
+math_mode : MathMode, optional
+    Defaults to FAST.
+defines : Mapping[str, str], optional
+    Preprocessor macros, part of the library cache key.
+constants : dict, optional
+    Function constant values, part of the pipeline cache key.
+
+Raises
+------
+CompileError
+    msl_source doesn't compile.
+FunctionNotFoundError
+    function_name isn't in msl_source.
+)doc")
+        .def_prop_ro("function_name", &PyKernel::function_name, "Entry point name.")
+        .def_prop_ro("math_mode", &PyKernel::math_mode, "Compiled math mode.")
+        .def_prop_ro("defines", &PyKernel::defines,
+                     "Preprocessor macros this kernel compiled with.")
+        .def_prop_ro("constants", &PyKernel::constants,
+                     "Function constant values this kernel was specialized with.")
+        .def_prop_ro(
+            "max_threads_per_threadgroup",
+            [](PyKernel& k) { return k.pipeline().max_threads_per_threadgroup(); },
+            "This kernel's own ceiling, which can be below the device maximum.")
+        .def_prop_ro(
+            "thread_execution_width",
+            [](PyKernel& k) { return k.pipeline().thread_execution_width(); },
+            "SIMD width for this kernel.")
+        .def_prop_ro(
+            "static_threadgroup_memory_length",
+            [](PyKernel& k) { return k.pipeline().static_threadgroup_memory_length(); },
+            "Bytes of threadgroup memory the kernel itself declares, before any "
+            "dynamic threadgroup_memory passed to run().")
         .def("__repr__",
              [](PyKernel& k) { return "Kernel(function_name='" + k.function_name() + "')"; });
 
     m.def("run", &run, nb::sig(kLaunchSignature), "kernel"_a, "grid"_a,
           "threadgroup"_a = nb::none(), "buffers"_a = std::vector<BufferArg>(),
           "scalars"_a = std::vector<HostArray>(), "threadgroup_memory"_a = std::vector<size_t>(),
-          "indirect_offset"_a = 0);
+          "indirect_offset"_a = 0,
+          R"doc(
+Dispatch one kernel launch and block until it completes.
+
+Parameters
+----------
+kernel : Kernel
+grid : int or Sequence[int] or Buffer
+    Thread count per dimension, or a Buffer of three uint32
+    threadgroup counts for an indirect dispatch.
+threadgroup : int or Sequence[int], optional
+    Explicit threadgroup size. None lets the runtime choose.
+buffers : Sequence[Buffer or tuple[Buffer, int]], optional
+    Bind in order; a (Buffer, offset) tuple binds at a byte offset
+    into that buffer's allocation.
+scalars : Sequence[numpy.ndarray or numpy.generic], optional
+    Bound inline with setBytes, after buffers.
+threadgroup_memory : Sequence[int], optional
+    Byte size for each [[threadgroup(i)]] allocation.
+indirect_offset : int, optional
+    Byte offset into `grid` when it is a Buffer.
+
+Raises
+------
+ValueError
+    The launch doesn't satisfy the kernel's own binding reflection.
+DispatchError
+    The GPU aborted the command buffer.
+)doc");
 
     nb::class_<PyBatch>(m, "Batch")
-        .def(nb::init<bool>(), "concurrent"_a = false)
+        .def(nb::init<bool>(), "concurrent"_a = false,
+             R"doc(
+Encode several launches into one command buffer.
+
+Parameters
+----------
+concurrent : bool, optional
+    Lets independent launches overlap on the GPU; ordering then only
+    exists across barrier(). Defaults to False (serial).
+)doc")
         .def("add", &PyBatch::add, nb::sig(kAddSignature), "kernel"_a, "grid"_a,
              "threadgroup"_a = nb::none(), "buffers"_a = std::vector<BufferArg>(),
              "scalars"_a = std::vector<HostArray>(), "threadgroup_memory"_a = std::vector<size_t>(),
-             "indirect_offset"_a = 0)
-        .def("barrier", &PyBatch::barrier)
-        .def("commit", &PyBatch::commit)
-        .def("wait", &PyBatch::wait)
-        .def_prop_ro("gpu_time", &PyBatch::gpu_time)
+             "indirect_offset"_a = 0,
+             R"doc(
+Encode one launch into this batch. Same parameters as run().
+
+Raises
+------
+DispatchError
+    This batch has already been committed.
+)doc")
+        .def("barrier", &PyBatch::barrier,
+             "Order buffer writes across a concurrent batch. Meaningless on a "
+             "serial (default) batch.")
+        .def("commit", &PyBatch::commit, "Close encoding and submit without blocking.")
+        .def("wait", &PyBatch::wait,
+             R"doc(
+Commit if needed, then block until the GPU is done.
+
+Raises
+------
+DispatchError
+    The command buffer faulted.
+)doc")
+        .def_prop_ro("gpu_time", &PyBatch::gpu_time,
+                     "Device-side execution seconds for the whole batch, set by wait().")
         .def(
             "__enter__", [](PyBatch& b) { return &b; }, nb::rv_policy::reference_internal,
-            nb::sig("def __enter__(self) -> typing.Self"))
+            nb::sig("def __enter__(self) -> typing.Self"), "Returns self.")
         .def(
             "__exit__",
             [](PyBatch& b, nb::handle exc_type, nb::handle, nb::handle) {
@@ -616,5 +873,7 @@ NB_MODULE(_core, m) {
             },
             nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
             nb::sig("def __exit__(self, exc_type: type[BaseException] | None, exc_value: "
-                    "BaseException | None, traceback: types.TracebackType | None) -> None"));
+                    "BaseException | None, traceback: types.TracebackType | None) -> None"),
+            "Waits on the batch if the body didn't raise; otherwise discards it "
+            "without committing.");
 }
