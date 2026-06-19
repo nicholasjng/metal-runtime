@@ -31,9 +31,8 @@ add_custom_target(
   VERBATIM)
 
 # Apple's official metal-cpp, fetched at configure time. Header-only:
-# Foundation / Metal / QuartzCore, no MPS. Bump the version by changing the
-# URL; the archive nests under metal-cpp/ on some releases, so handle either
-# layout.
+# Foundation / Metal / QuartzCore, no MPS. Bump the version by changing the URL.
+# The archive nests under metal-cpp/ on some releases, so handle either layout.
 include(FetchContent)
 FetchContent_Declare(
   metalcpp
@@ -120,7 +119,7 @@ if(METAL_RUNTIME_HAVE_NANOBIND)
     DEPENDS _core
   )
 
-  # Run `ruff format`/`check --fix` on the freshly-generated stub, same as mew.
+  # Run `ruff format`/`check --fix` on the freshly-generated stub.
   # Skipped if ruff isn't available (e.g. building from an sdist without dev extras).
   execute_process(
     COMMAND ${Python_EXECUTABLE} -m ruff --version

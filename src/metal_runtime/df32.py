@@ -18,8 +18,8 @@ def kernel(source: str, function_name: str, **kwargs) -> mr.Kernel:
     `math_mode` pinned to `mr.MathMode.SAFE`.
 
     `mr.Kernel` defaults to `MathMode.FAST`, which silently reassociates away
-    the compensation terms this prelude depends on. This helper exists so
-    that's not something a caller has to remember.
+    the compensation terms this prelude depends on.
+    This helper exists so that's not something a caller has to remember.
 
     Parameters
     ----------

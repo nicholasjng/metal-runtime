@@ -302,3 +302,144 @@ replacing the `fma()` with a plain expression (1 fail), and flipping `FAST` back
 to `SAFE` in the destruction test (2 fail). A green suite proves nothing here; the
 `in`-against-`ParameterSet` bug earlier in this step passed lint, `ty`, and all
 three tests while silently skipping the entire negative control.
+
+## df32 Step 2 done: host-side split/join   (2026-07-31, Claude + NJ)
+
+**Done:** `df32.split`/`df32.join` convert float64 <-> (hi, lo) float32 pairs,
+validated by 12 tests covering round-trip bound (~2^-47), bit-exact recovery of
+already-representable pairs, the non-overlap invariant, shape/dtype/layout for
+split (including the GPU round-trip through `df32_identity`, proving the numpy
+`(..., 2) float32` layout and `device df32*` are the same bytes), range
+rejection at both ends, non-finite passthrough, subnormal degradation bounds,
+and idempotence of repeated split/join.
+
+**Why:** this is the boundary every later step crosses to get data on and off
+the GPU; a layout or precision bug here would silently corrupt `df_add`/`df_mul`
+inputs rather than fail visibly.
+
+**Note (real bugs found in review, not just test bugs):** two host-side
+regexes/tests were themselves buggy on first pass — `nan != nan` breaking the
+non-finite test, and `==` on a multi-element array inside a bare `assert`
+(`ValueError: truth value of an array...is ambiguous`) breaking the idempotence
+test — both fixed to use `np.isnan`/`np.array_equal`. Separately, two real bugs
+surfaced in `df32.py` itself: `join`'s error message didn't match the test's
+regex (wording drift, not logic), and `-0.0` lost its sign on round-trip because
+IEEE 754 defines `x - y` as `+0.0` (not sign-of-operand-dependent) whenever
+`x == y` exactly, so `hi + lo` for `x = -0.0` summed `-0.0 + 0.0 = +0.0`. First
+fix attempt over-corrected — `np.copysign(lo, x)` unconditionally, which flips
+the sign of any *legitimately* negative residual (e.g. positive `x` whose
+`hi` rounds up past it) — broken until narrowed to `np.where(lo == 0,
+np.copysign(lo, x), lo)`, which only touches the genuinely sign-ambiguous
+zero-residual case.
+
+## df32 Steps 3-6 done: df_add, df_mul, accuracy suite, SAFE guard   (2026-08-04, Claude + NJ)
+
+**Done:** `df_add`/`df_mul` added to `df32.metal`; 22 new tests cover the
+2^-40 accuracy bound, non-overlap, chained accumulation, near-cancellation,
+wide exponent spread, range limits, signed zero, and per-routine `MathMode`
+behavior. Step 6's `#if defined(__FAST_MATH__) || defined(__RELAXED_MATH__)
+#error` guard now rejects the whole prelude outside `SAFE`, and
+`df32.kernel(source, name)` pins `SAFE` for callers. Landed directly (not as a
+tutor exercise) to unblock a dependent Pallas-to-MSL codegen effort in another
+repo; see `.tutor/progress.md`'s 2026-08-04 note.
+
+**Why:** `df_add` is written as the fully-renormalized ("accurate") double-sum
+variant, not the cheaper "sloppy" one — measured, sloppy's occasional
+near-cancellation cases pushed relative error past 2^-35, well outside the
+plan's target. `df_mul` drops the `a.lo*b.lo` cross term as second-order small.
+The step-6 guard, once added, makes step 1's old FAST-mode tests
+(`test_fast_math_destroys_compensation`, `test_two_prod_survives_fast_math`)
+observe a compile-time rejection instead of a silently-wrong runtime result,
+since they compile the same guarded prelude — updated in place rather than
+removed, since the *property* they're pinning (FAST is unsafe here) still
+holds, just enforced earlier now.
+
+**Note (two real hardware effects worth knowing, not bugs):** (1) Apple GPUs
+flush subnormal float32 *results* to zero even under `MathMode.SAFE` — unlike
+`__FAST_MATH__`, this isn't a reassociation-optimizer effect and there's no
+flag to disable it. It only bites `df_add`/`df_mul` when an operand's own
+compensation term underflows below ~2^-126 absolute, which needs the operand's
+exponent pushed close to float32's edge; `SAFE_EXP_RANGE`/`MUL_SAFE_EXP_RANGE`
+in the tests stay clear of that by design, and it's the same phenomenon
+`test_subnormals_degrade_but_do_not_crash` already documents for `split`.
+(2) The 2^-46 accuracy bound in the plan is optimistic: measured worst-case
+over 10k random pairs for the accurate variant is closer to 2^-44; tests use
+2^-40 for margin. A test bug produced a red herring here too: combining a
+chained `df_add` accumulator's final `hi`/`lo` with a bare `acc[0,0] +
+acc[0,1]` sums in float32 (the array's dtype) and throws away the
+compensation the test exists to check — fixed to go through `df32.join`.
+
+## df32: rounded out the op set (df_sub, df_neg, df_abs, conversions, comparisons, df_fma)   (2026-08-04, Claude + NJ)
+
+**Done:** `df32.metal` gained `df_sub` (= `df_add` + negate), `df_neg`,
+`df_abs`, `df_from_float`/`df_to_float` (promote/demote), `df_lt`/`df_gt`/
+`df_le`/`df_ge`/`df_eq` (hi-first, lo-tiebreak ordering), and `df_fma`. 11 new
+tests, all passing at the same 2^-40 bound as `df_add`/`df_mul`.
+
+**Why:** these weren't in the plan's original step list but round out what a
+Pallas-generated kernel actually needs — comparisons/conversions for anything
+branchy or mixed-precision, `df_fma` specifically because this arc exists for
+matmul/attention-style accumulation loops, where a fused op saves both an
+instruction and a rounding step over calling `df_mul` then `df_add`.
+
+**Note:** `df_fma` skips `df_mul`'s own renormalization pass and feeds the raw
+product limbs straight into `df_add`, since `two_sum`/`quick_two_sum` are exact
+for *any* float pair, not just already-non-overlapping ones — `df_add`'s own
+renormalization covers it. Measured at 2^-42 worst-case over 10k samples, same
+ballpark as the two-call version. No new FAST-mode tests were needed per op:
+the step-6 guard already rejects any kernel compiled against `PRELUDE`
+regardless of which functions it calls, so `test_prelude_rejects_non_safe_math_
+at_compile_time` covers all of these for free.
+
+## df32 Step 7 (stretch) done: df_div, df_sqrt   (2026-08-04, Claude + NJ)
+
+**Done:** `df_div` is iterative refinement from a correctly-rounded float32
+seed (`a.hi/b.hi`): each residual `a - q_k*b` gets its own correctly-rounded
+quotient term folded back in via `df_add`, two rounds. `df_sqrt` uses Karp's
+trick: `rsqrt(a.hi)` is a correctly-rounded seed, `ax = a.hi*x` is then a
+correctly-rounded float32 sqrt, and a single float32-precision correction term
+(`(a - ax^2) * x/2`) roughly doubles that to df32 precision; `a.hi <= 0` is
+special-cased to fall through to plain `sqrt()` so 0 and negative inputs get
+IEEE's answer (0 and NaN) instead of a division inside the general path. 8 new
+tests, both routines measured at 2^-45 to 2^-47 worst-case over 10k-200k
+samples, well inside the 2^-40 bound.
+
+**Why:** both seeds being correctly-rounded (MSL spec, page 368: `x/y` and
+`sqrt`/`rsqrt` are "Correctly rounded" under SAFE math, unlike transcendentals
+at ≤4-6 ulp) is what makes one or two refinement rounds enough here, instead of
+needing a from-scratch algorithm. This is also why transcendentals stay out of
+scope: there's no equivalently cheap correction available for them.
+
+**Note:** first wrote the df_div comment claiming "one round alone was not
+enough" without having actually measured it. Checked before shipping the
+claim: one round alone already clears 2^-45 over 200k samples across 10 seeds,
+the second round buys about another bit of margin (2^-46.6) for the same
+shape of code. Kept the two-round version for the extra margin, but corrected
+the comment to say what was measured rather than assert something unverified.
+`test_math_mode_behavior_is_pinned_per_routine` gained `df_div` (fits the
+existing binop harness); `df_sqrt` needed its own unary counterpart, per the
+docstring note left there when that test was written.
+
+## df32: simplify pass on Step 7   (2026-08-04, Claude + NJ)
+
+**Done:** `df_div`/`df_sqrt`'s final combine step now uses `quick_two_sum`
+instead of a full `df_add`. Factored the identical SAFE/non-SAFE branch out of
+`test_math_mode_behavior_is_pinned_per_routine` and
+`test_sqrt_math_mode_behavior_is_pinned` into `_assert_math_mode_pinned`.
+Reverted `notes/float32x2.md`'s Step 7 section back to plain plan text (no
+"done" annotation or measured numbers), matching how steps 3-6 were left
+there; that detail lives in this file, not duplicated in two places.
+
+**Why:** `q0`/`q1`/`q2` (div) and `ax`/`correction` (sqrt) are magnitude-
+ordered by construction with a provably-zero `lo`, so `df_add`'s general
+two-`two_sum` renormalization was doing ~20 flops/thread of work that
+`quick_two_sum` does in ~6, on a GPU hot path. Re-measured after the change:
+same accuracy (2^-45 to 2^-47), same non-overlap and edge-case behavior.
+
+**Note:** a suggested fix from the same review pass — dropping `df_sqrt`'s
+`a.hi <= 0` branch entirely, reasoning the general path would degrade to
+IEEE's answer anyway — turned out to be wrong when checked on the GPU:
+`rsqrt(0)` is `inf`, and `0 * inf` is `NaN` per IEEE 754, not `0`. Without the
+branch, `sqrt(0)` returns `NaN` instead of `0`. Kept the branch; improved its
+comment to say why (avoiding the `0*inf` indeterminate form, not "avoiding a
+division") instead of applying the suggested removal.

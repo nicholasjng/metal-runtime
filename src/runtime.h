@@ -49,27 +49,20 @@ class MetalRuntime {
     // evenly by the threadgroup.
     bool supports_non_uniform_threadgroups() const { return non_uniform_threadgroups_; }
 
-    // Compiled libraries keyed by source text *and* compile options:
-    // dispatching an already-seen kernel skips recompilation, but the same
-    // source under a different math mode is a different library, not a cache
-    // hit. Returns a shared_ptr rather than a reference into the map because
+    // Compiled libraries are keyed by source text *and* compile options.
+    // Returns a shared_ptr rather than a reference into the map because
     // eviction, or another thread's insert, must not pull the Library out from
     // under a caller that is still building a pipeline from it.
     std::shared_ptr<Library> library_for(const std::string& msl_source,
                                          const CompileOptions& options = {});
 
-    // 0 disables eviction. Evicts least-recently-used entries down to `limit`.
+    // Evicts least-recently-used entries down to `limit`, 0 disables eviction.
     void set_library_cache_limit(size_t limit);
     size_t library_cache_limit() const;
     size_t library_cache_size() const;
     void clear_library_cache();
 
-    // Off by default. A path loads an existing archive there if one exists,
-    // else starts an empty one; nullopt turns caching back off. Metal's own
-    // archive lookup keys on compiled content, so a source/option change
-    // misses and recompiles rather than serving stale code. Call once at
-    // startup: a concurrent call could swap the archive out from under an
-    // in-flight build.
+    // A path loads an archive if it exists, nullopt disables caching.
     void set_pipeline_cache_dir(std::optional<std::string> path);
     std::optional<std::string> pipeline_cache_dir() const;
 
@@ -85,10 +78,6 @@ class MetalRuntime {
     MTL::CommandQueue* queue_ = nullptr;
     bool non_uniform_threadgroups_ = false;
 
-    // Guards every cache member below. The nanobind module is built
-    // FREE_THREADED, so on a free-threaded interpreter two threads can be
-    // inside library_for() at once with no GIL serializing them, and an
-    // unsynchronized rehash of `libraries_` is a corrupted map.
     mutable std::mutex mutex_;
     using LRUList = std::list<std::string>;
     LRUList lru_;  // front = most recently used

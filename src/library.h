@@ -28,25 +28,19 @@ class ComputePipeline;
 // double-single arithmetic), has to compile under `Safe` to survive.
 enum class MathMode { Safe, Relaxed, Fast };
 
-// Compile-time configuration for one MSL translation unit. Part of the library
-// cache key, so the same source compiled in two different ways yields two distinct libraries.
+// Compile-time configuration for one MSL translation unit.
+// Part of the library cache key, so different options produce different libraries.
 struct CompileOptions {
     MathMode math_mode = MathMode::Fast;  // Metal's default, kept as ours
 
-    // Emitted as preprocessor macros. The lever a code generator uses to
-    // specialize one source string by block size or element type instead of
-    // emitting a textually distinct kernel per variant.
+    // Emitted as preprocessor macros.
     std::map<std::string, std::string> defines;
 
-    // Injective: every distinct CompileOptions maps to a distinct string, so
-    // it can be concatenated into a cache key without ambiguity.
     std::string cache_key() const;
 };
 
 // One MSL function constant, baked in at pipeline build. Unlike `defines`,
-// specializing skips recompiling the library. Plain Python bool/int/float
-// arrive as their own kinds and coerce to the declared MSL type; numpy
-// scalars arrive Exact and must match it.
+// specializing skips recompiling the library.
 struct FunctionConstant {
     enum class Kind : uint8_t { Bool, Int, Float, Exact };
 
@@ -75,8 +69,7 @@ struct MSLFunctionNotFoundError : MSLCompileError {
     using MSLCompileError::MSLCompileError;
 };
 
-// Compiles MSL source at runtime via newLibrary, the NVRTC equivalent:
-// no offline metal/metallib toolchain needed.
+// Compiles MSL source at runtime via newLibrary, no metal/metallib toolchain needed.
 class Library {
    public:
     Library(MTL::Device* device, const std::string& msl_source, const CompileOptions& options = {});
@@ -90,9 +83,8 @@ class Library {
     // constants (missing required, unknown name, type mismatch).
     MTL::Function* function(const std::string& name, const FunctionConstants& constants = {}) const;
 
-    // Cached: newComputePipelineState costs milliseconds. The cache lives
-    // here so evicting a library drops its pipelines with it. `archive`
-    // passes straight through to ComputePipeline on a cache miss.
+    // Evicting a library drops its pipelines with it.
+    // `archive` passes straight through to ComputePipeline on a cache miss.
     std::shared_ptr<ComputePipeline> pipeline_for(const std::string& name,
                                                   const FunctionConstants& constants = {},
                                                   MTL::BinaryArchive* archive = nullptr);
@@ -100,19 +92,14 @@ class Library {
    private:
     bool has_function(const std::string& name) const;
 
-    // Reflects the *unspecialized* function for its declared constants
-    // (functionConstantsDictionary is populated only there), validates and
-    // coerces `constants` against them, then creates via the constantValues
-    // variant -- the only path whose product survives pipeline creation.
-    // Fills `canonical` (all Exact, post-coercion) when non-null, so two
-    // spellings of the same value share a pipeline cache entry.
+    // Reflects the *unspecialized* function for its declared constants.
+    // Validates and coerces `constants` against them, then creates via the constantValues variant.
     MTL::Function* create_specialized(const std::string& name, const FunctionConstants& constants,
                                       FunctionConstants* canonical) const;
 
     MTL::Device* device_ = nullptr;  // borrowed from the runtime singleton
     MTL::Library* library_ = nullptr;
 
-    // Guards pipelines_; the module is built free-threaded.
     std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<ComputePipeline>> pipelines_;
 };

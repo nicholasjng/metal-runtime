@@ -5,8 +5,6 @@
 
 namespace {
 
-// The MSL spelling of each type is in the comment: that's the declaration a
-// generated kernel needs for a buffer of this dtype to line up.
 struct Entry {
     const char* name;
     DType dtype;

@@ -6,8 +6,8 @@ class Device;
 class Buffer;
 }  // namespace MTL
 
-// ResourceStorageModeShared: unified memory means host and GPU read/write the
-// same bytes, so contents() is a plain pointer, no upload/readback copy needed.
+// Unified memory, so host and GPU read/write the same bytes.
+// This makes contents() a plain pointer, no upload/readback copy needed.
 class Buffer {
    public:
     Buffer(MTL::Device* device, size_t size_bytes);
@@ -15,8 +15,7 @@ class Buffer {
     // Wraps caller-owned memory with no copy. external_ptr must stay valid
     // and unmoved for this Buffer's lifetime; the caller keeps ownership and
     // frees it only after this Buffer is destroyed. Requires page-aligned
-    // external_ptr/size_bytes; throws std::invalid_argument otherwise rather
-    // than silently falling back to a copy.
+    // external_ptr/size_bytes; throws std::invalid_argument otherwise.
     Buffer(MTL::Device* device, void* external_ptr, size_t size_bytes);
 
     ~Buffer();

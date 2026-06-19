@@ -37,16 +37,16 @@ build = [
     "scikit-build-core>=1.0",
 ]
 test = [
+    "ml-dtypes>=0.5",
     "pytest>=8",
-    "ml-dtypes>=0.5", # to exercise the bfloat16 interop path, as NumPy can't represent that dtype.
 ]
 typing = [
     "ty>=0.0.65",
 ]
 
 [tool.uv]
-# Build against the project .venv so includes from Python packages (nanobind
-# etc.) in compile_commands.json survive across rebuilds.
+# Build against the project .venv so includes from Python packages
+# (nanobind etc.) in compile_commands.json survive across rebuilds.
 no-build-isolation-package = ["metal-runtime"]
 default-groups = ["bench", "build", "test", "typing"]
 
@@ -54,7 +54,7 @@ default-groups = ["bench", "build", "test", "typing"]
 extend-exclude = ["ext"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/metal_runtime/_core.pyi" = ["C408"]  # stubgen outputs array metadata with a dict(...) call
+"src/metal_runtime/_core.pyi" = ["C408"]  # dict(...) literals
 
 [tool.ty.src]
 include = ["src", "tests"]

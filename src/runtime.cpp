@@ -56,8 +56,7 @@ size_t MetalRuntime::max_buffer_length() const { return (size_t)(device_->maxBuf
 
 std::shared_ptr<Library> MetalRuntime::library_for(const std::string& msl_source,
                                                    const CompileOptions& options) {
-    // Length-prefixed so the options blob can't be confused with the start of
-    // the source text.
+    // Length-prefixed so the options blob can't be confused with the start of the source text.
     std::string serialized = options.cache_key();
     const std::string key = std::to_string(serialized.size()) + ":" + serialized + msl_source;
 
@@ -70,11 +69,6 @@ std::shared_ptr<Library> MetalRuntime::library_for(const std::string& msl_source
         }
     }
 
-    // Compiled outside the lock: newLibrary runs the whole MSL front end and
-    // takes milliseconds, and holding the mutex across it would serialize
-    // every thread compiling a *different* kernel. Two threads racing on the
-    // same source both compile, and the loser's copy is dropped below -
-    // wasted work in a rare case, in exchange for no contention in the common one.
     auto library = std::make_shared<Library>(device_, msl_source, options);
 
     std::lock_guard<std::mutex> lock(mutex_);

@@ -20,14 +20,14 @@ class Function;
 class BinaryArchive;
 }  // namespace MTL
 
-// The GPU rejected or aborted a committed command buffer. Distinct from a
-// compile error: the kernel built fine, the execution didn't.
+// The GPU rejected or aborted a committed command buffer.
+// Distinct from a compile error: the kernel built fine, the execution didn't.
 struct DispatchError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// A 1-, 2- or 3-dimensional extent. Metal always works in 3D; unused
-// dimensions are 1.
+// A 1-, 2- or 3-dimensional extent.
+// Metal always works in 3D, unused dimensions are 1.
 struct Dim3 {
     size_t x = 1, y = 1, z = 1;
     size_t volume() const { return x * y * z; }
@@ -56,14 +56,13 @@ class ComputePipeline {
     MTL::ComputePipelineState* handle() const { return pipeline_; }
     const std::string& label() const { return label_; }
 
-    // Hardware limits for this specific kernel, not the device: register
-    // pressure can push a kernel's ceiling well below the device maximum.
+    // Hardware limits for this specific kernel, not the device:
+    // register pressure can push a kernel's ceiling well below the device maximum.
     size_t max_threads_per_threadgroup() const;
     size_t thread_execution_width() const;
     size_t static_threadgroup_memory_length() const;
 
-    // Used buffer and [[threadgroup(i)]] arguments; optimized-out ones are
-    // not listed.
+    // Used buffer and [[threadgroup(i)]] arguments, optimized-out ones are not listed.
     const std::vector<BindingInfo>& buffer_bindings() const { return buffer_bindings_; }
     const std::vector<BindingInfo>& threadgroup_bindings() const { return threadgroup_bindings_; }
 
@@ -71,18 +70,14 @@ class ComputePipeline {
     // kernel's own ceiling -- what dispatch() picks when the caller doesn't.
     Dim3 default_threadgroup(Dim3 grid) const;
 
-    // Validates binding counts, threadgroup dims, and threadgroup memory
-    // budget; not buffer identities or grid size, so a stepping loop
-    // relaunching the same kernel at the same shape can cache the result.
+    // Validates binding counts, threadgroup dims, and threadgroup memory budget,
+    // not buffer identities or grid size, so a stepping loop relaunching the same
+    // kernel at the same shape can cache the result.
     void validate_shape(size_t binding_count, const std::vector<size_t>& threadgroup_memory,
                         Dim3 threadgroup, size_t device_max_threadgroup_memory);
 
    private:
-    // The subset of a launch this validation actually depends on. Compared
-    // field-wise against the shapes already cleared, which is why it is a
-    // struct and not a serialized cache key: building one string per launch
-    // cost 173ns of the ~470ns encode, against 7ns for this comparison, and
-    // a launch loop re-validates the same shape every time.
+    // The subset of a launch this validation actually depends on.
     struct LaunchShape {
         size_t binding_count = 0;
         size_t device_max_threadgroup_memory = 0;
@@ -103,8 +98,7 @@ class ComputePipeline {
     std::vector<BindingInfo> buffer_bindings_;
     std::vector<BindingInfo> threadgroup_bindings_;
 
-    // Cached in the constructor: every launch reads these, and they are fixed
-    // for the life of the pipeline.
+    // Cached in the constructor, fixed for the lifetime of the pipeline.
     size_t max_threads_per_threadgroup_ = 0;
     size_t thread_execution_width_ = 0;
     size_t static_threadgroup_memory_length_ = 0;
@@ -136,9 +130,9 @@ struct Launch {
     size_t indirect_offset = 0;
 };
 
-// Several launches in one command buffer: one commit for the sequence. The
-// default serial encoder orders launches; a concurrent encoder lets them
-// overlap, with ordering only across an explicit barrier().
+// Several launches in one command buffer, one commit for the sequence.
+// The default serial encoder orders launches, a concurrent encoder lets them overlap,
+// with ordering only across an explicit barrier().
 class CommandBatch {
    public:
     explicit CommandBatch(MTL::CommandQueue* queue, bool concurrent = false);
@@ -148,8 +142,8 @@ class CommandBatch {
     CommandBatch& operator=(const CommandBatch&) = delete;
 
     // Validates `launch` against the pipeline's limits, its compiler-reported
-    // argument list, and the device's threadgroup capabilities, then encodes
-    // it. Throws before touching the encoder if the launch is invalid.
+    // argument list, and the device's threadgroup capabilities, then encodes it.
+    // Throws before touching the encoder if the launch is invalid.
     void add(const Launch& launch);
 
     // Orders buffer writes across it; only needed on a concurrent encoder.

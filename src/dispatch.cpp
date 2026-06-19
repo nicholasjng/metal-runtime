@@ -118,9 +118,6 @@ void ComputePipeline::validate_shape(size_t binding_count,
                                     " must be non-zero in every dimension");
     }
 
-    // Not clamped. Silently shrinking the threadgroup changes what a kernel
-    // that indexes threadgroup memory by thread_position_in_threadgroup
-    // computes, and the caller gets wrong numbers with no indication why.
     size_t max_total = max_threads_per_threadgroup();
     if (tg.x > max_total || tg.y > max_total || tg.z > max_total || tg.volume() > max_total) {
         throw std::invalid_argument("dispatch: threadgroup " + to_string(tg) + " has " +
@@ -153,8 +150,8 @@ void ComputePipeline::validate_shape(size_t binding_count,
         }
     }
 
-    // Static and dynamic threadgroup memory share one budget; exceeding it
-    // downstream is a process abort (Metal API validation), not an error.
+    // Static and dynamic threadgroup memory share one budget, exceeding it downstream
+    // is a process abort (Metal API validation), not an error.
     size_t threadgroup_total = static_threadgroup_memory_length();
     for (size_t length : threadgroup_memory) {
         threadgroup_total += rounded_threadgroup_length(length);

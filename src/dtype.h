@@ -15,8 +15,8 @@ struct DType {
     bool operator!=(const DType& other) const { return !(*this == other); }
 };
 
-// Every element type an MSL kernel can address. Throws std::invalid_argument,
-// naming the supported set, for anything else.
+// Every element type an MSL kernel can address.
+// Throws std::invalid_argument, naming the supported set, for anything else.
 DType dtype_from_name(const std::string& name);
 
 // nullptr if `dt` isn't a dtype this runtime supports.

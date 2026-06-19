@@ -1,6 +1,6 @@
 // C-linkable entry point into metal-runtime's dispatch, for callers without
-// Python or the GIL (e.g. an XLA FFI custom-call handler). Mirrors
-// dispatch.h's Library/ComputePipeline/Buffer/dispatch(), flattened to
+// Python or the GIL (e.g. an XLA FFI custom-call handler).
+// Mirrors dispatch.h's Library/ComputePipeline/Buffer/dispatch(), flattened to
 // opaque handles and POD structs. No C++ or Objective-C types in signatures.
 //
 // Ownership: compile once (mr_compile_library + mr_get_pipeline) at

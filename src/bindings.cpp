@@ -88,8 +88,6 @@ DType from_dlpack(nb::dlpack::dtype dt) {
 
 nb::dlpack::dtype to_dlpack(DType dt) { return nb::dlpack::dtype{dt.code, dt.bits, 1}; }
 
-// A wrong-width scalar doesn't fail, the kernel just reads garbage; float64
-// (numpy's default) gets its own message.
 void check_scalar_dtype(const HostArray& scalar, size_t position) {
     nb::dlpack::dtype dt = scalar.dtype();
     if (dt.code == DType::Float && dt.bits == 64 && dt.lanes == 1) {
@@ -117,11 +115,9 @@ size_t checked_element_count(const std::vector<size_t>& shape) {
     return count;
 }
 
-// Resolves the dtype a buffer's bytes should be labelled with. An explicit
-// name reinterprets rather than converts (numpy's `.view` semantics), which
-// is the way in for element types NumPy itself can't hand across the boundary:
-// an ml_dtypes bfloat16 array exports through neither DLPack nor the buffer
-// protocol, so it arrives here as its uint16 view and gets relabelled.
+// Resolves the dtype a buffer's bytes should be labelled with.
+// An explicit name reinterprets rather than converts (numpy's `.view` semantics),
+// which is the way in for element types NumPy itself can't hand across the boundary.
 DType resolve_dtype(const HostArray& array, const std::optional<std::string>& override_name) {
     if (!override_name) return from_dlpack(array.dtype());
 
@@ -129,8 +125,8 @@ DType resolve_dtype(const HostArray& array, const std::optional<std::string>& ov
     if (array.dtype().lanes != 1) {
         throw std::invalid_argument("vector dtypes are not supported; pass a scalar dtype");
     }
-    // The only invariant reinterpretation has to preserve is element width, so
-    // that the shape and the byte count still agree.
+    // The only invariant reinterpretation has to preserve is element width,
+    // so that the shape and the byte count still agree.
     if (array.itemsize() != requested.itemsize()) {
         throw std::invalid_argument(
             "dtype '" + *override_name + "' is " + std::to_string(requested.itemsize()) +
@@ -152,8 +148,8 @@ class PyBuffer {
         std::memcpy(buffer_->contents(), array.data(), array.nbytes());
     }
 
-    // No upload: for kernels that write every output element themselves (a
-    // Pallas rollout's out_ref). Zero-initialized rather than left
+    // No upload: for kernels that write every output element themselves
+    // (a Pallas rollout's out_ref). Zero-initialized rather than left
     // uninitialized, cheap next to the upload path it replaces, and it rules
     // out reading back garbage from a kernel that misses an element.
     static PyBuffer zeros(std::vector<size_t> shape, const std::string& dtype) {
@@ -184,10 +180,6 @@ class PyBuffer {
         std::memcpy(buffer_->contents(), array.data(), array.nbytes());
     }
 
-    // `owner` ties the returned array's lifetime to this PyBuffer so it can't
-    // outlive the memory it views.
-    // `dtype` reinterprets on the way out, mirroring the constructor: the
-    // escape hatch for element types NumPy can't represent on its own.
     nb::ndarray<nb::numpy> to_numpy(const std::optional<std::string>& dtype) {
         DType out = dtype_;
         if (dtype) {
@@ -248,8 +240,8 @@ class PyBuffer {
     std::unique_ptr<Buffer> buffer_;
 };
 
-// bool/int/float coerce to the declared MSL type at specialization; a numpy
-// scalar pins an exact width that must match the declaration.
+// bool/int/float coerce to the declared MSL type at specialization;
+// a numpy scalar pins an exact width that must match the declaration.
 FunctionConstants parse_constants(const nb::dict& constants) {
     FunctionConstants out;
     out.reserve(constants.size());
@@ -696,7 +688,7 @@ mlx.core.array
             [](PyBuffer& b, nb::kwargs) {
                 // nb::ndarray<> (no framework) casts directly to a raw DLPack capsule.
                 // Unlike routing through to_numpy(), this never consults NumPy's dtype
-                //  table, so bfloat16 (and anything else DType supports) exports fine.
+                // table, so bfloat16 (and anything else DType supports) exports fine.
                 return b.to_dlpack_ndarray();
             },
             nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"),
@@ -891,8 +883,8 @@ dict or None
             "__exit__",
             [](PyBatch& b, nb::handle exc_type, nb::handle, nb::handle) {
                 // Nothing is committed if the body raised: the destructor
-                // closes the encoder and drops the command buffer instead, so
-                // a half-encoded sequence never reaches the GPU.
+                // closes the encoder and drops the command buffer instead,
+                // so a half-encoded sequence never reaches the GPU.
                 if (exc_type.is_none()) b.wait();
             },
             nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),

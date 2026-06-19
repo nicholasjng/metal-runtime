@@ -42,8 +42,8 @@ MTL::CompileOptions* build_options(const CompileOptions& options) {
     if (__builtin_available(macOS 15.0, *)) {
         mtl_options->setMathMode(to_mtl(options.math_mode));
     } else {
-        // mathMode is macOS 15+; the selector crashes on older OSes. The
-        // legacy boolean keeps what matters: SAFE preserves EFTs.
+        // mathMode is macOS 15+; the selector crashes on older OSes.
+        // The legacy boolean keeps what matters: SAFE preserves EFTs.
         mtl_options->setFastMathEnabled(options.math_mode != MathMode::Safe);
     }
 
@@ -62,9 +62,8 @@ MTL::CompileOptions* build_options(const CompileOptions& options) {
     return mtl_options;
 }
 
-// The scalar MSL types a function constant can have, mapped in both
-// directions: MTL::DataType for Metal, DType for the canonical cache key,
-// the MSL spelling for error messages.
+// The scalar MSL types a function constant can have, mapped in both directions:
+// MTL::DataType for Metal, DType for the canonical cache key, the MSL spelling for error messages.
 struct TypeEntry {
     MTL::DataType mtl;
     DType dtype;
@@ -93,8 +92,7 @@ const TypeEntry* type_entry(MTL::DataType t) {
     return nullptr;
 }
 
-// One entry point's declared constants, from reflection on the
-// unspecialized function.
+// One entry point's declared constants, from reflection on the unspecialized function.
 struct DeclaredConstant {
     MTL::DataType type;
     bool required;
@@ -111,8 +109,8 @@ std::map<std::string, DeclaredConstant> read_declared(MTL::Function* fn) {
     return out;
 }
 
-// Coerces one provided constant to its declared MSL type; the result is
-// Exact with the declared dtype and the typed value bytes.
+// Coerces one provided constant to its declared MSL type.
+// The result is exact with the declared dtype and the typed value bytes.
 FunctionConstant coerce(const FunctionConstant& c, MTL::DataType declared) {
     const TypeEntry* target = type_entry(declared);
     if (!target) {
@@ -379,9 +377,8 @@ std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
     FunctionConstants canonical;
     MTL::Function* fn = create_specialized(name, constants, &canonical);
 
-    // Coercion may map this spelling onto a pipeline that already exists
-    // under another one ({N: 8} vs {N: np.uint32(8)}); alias rather than
-    // build a duplicate.
+    // Coercion may map this spelling onto a pipeline that already exists under another
+    // ({N: 8} vs {N: np.uint32(8)}). Alias rather than build a duplicate.
     const std::string canonical_key = pipeline_key(name, canonical);
     {
         std::lock_guard<std::mutex> lock(mutex_);

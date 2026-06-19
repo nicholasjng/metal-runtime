@@ -42,8 +42,6 @@ void set_error(char** out_err_msg, const std::string& message) {
 }
 
 // One AutoreleaseScope per call, one exception-to-MRStatus mapping.
-// MSLFunctionNotFoundError must be caught before MSLCompileError: it
-// derives from it.
 template <typename Fn>
 MRStatus mr_guard(char** out_err_msg, Fn&& fn) {
     AutoreleaseScope scope;
@@ -71,11 +69,10 @@ MRStatus mr_guard(char** out_err_msg, Fn&& fn) {
     }
 }
 
-// True if every byte of [start, start + length) lies in one mapped,
-// read+write VM region. Page-rounding a caller-supplied pointer can grow
-// the wrapped range past what the caller actually owns; this is what
-// keeps that growth from ever reaching into unmapped memory before
-// handing the range to Metal.
+// True if every byte of [start, start + length) lies in one mapped, r+w VM region.
+// Page-rounding a caller-supplied pointer can grow the wrapped range past
+// what the caller actually owns - this is what keeps that growth from reaching
+// into unmapped memory before handing the range to Metal.
 bool region_is_mapped_rw(void* start, size_t length) {
     if (length == 0) return true;
     mach_vm_address_t queried = (mach_vm_address_t)(uintptr_t)start;
@@ -90,8 +87,8 @@ bool region_is_mapped_rw(void* start, size_t length) {
     if (object_name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object_name);
     if (kr != KERN_SUCCESS) return false;
     // mach_vm_region rounds `addr` up to the next mapped region when the
-    // queried address itself falls in an unmapped hole; if it moved,
-    // `start` was never mapped in the first place.
+    // queried address itself falls in an unmapped hole.
+    // If it moved, `start` was never mapped in the first place.
     if (addr > queried) return false;
     if (!(info.protection & VM_PROT_READ) || !(info.protection & VM_PROT_WRITE)) return false;
     return queried + (mach_vm_size_t)length <= addr + region_size;
@@ -148,10 +145,10 @@ MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, cha
 
         if (size_bytes > 0) {
             // Round [ptr, ptr + size_bytes) out to enclosing page boundaries:
-            // newBufferWithBytesNoCopy (Buffer's external-ptr constructor)
-            // requires both page-exact, which real allocations almost never are
-            // on their own. The true data starts `offset` bytes into the wrapped
-            // region; mr_dispatch adds that back in via external_offset, so callers
+            // newBufferWithBytesNoCopy (Buffer's external-ptr constructor) requires
+            // both page-exact, which real allocations almost never are.
+            // The true data starts `offset` bytes into the wrapped region;
+            // `mr_dispatch` adds that back in via `external_offset`, so callers
             // never see it. Falls back to an owned copy if the rounded range would
             // reach outside ptr's actual mapping.
             size_t page_size = (size_t)getpagesize();
