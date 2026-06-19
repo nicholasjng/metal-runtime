@@ -77,9 +77,10 @@ Cheap, but do it first so every later step lands in its final home.
       `wheel.packages = ["src/metal_runtime"]` should copy it, but confirm rather
       than assume — a missing data file fails only at import time, in someone
       else's environment.
-- [ ] Decide whether `df32` is re-exported from `__init__.py` or stays an
+- [x] Decide whether `df32` is re-exported from `__init__.py` or stays an
       explicit `from metal_runtime import df32` import. Prefer the latter: it
-      keeps the top-level namespace about the runtime.
+      keeps the top-level namespace about the runtime. Decided: stays explicit,
+      `__init__.py` does not import it.
 
 **Done when:** `uv run python -c "from metal_runtime import df32; print(len(df32.PRELUDE))"`
 works and the file is in the wheel.

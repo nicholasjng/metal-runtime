@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.16.1
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
@@ -14,17 +14,15 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: '^(patches/.*\.patch|ext/)'
       - id: end-of-file-fixer
-        exclude: '^(patches/.*\.patch|ext/)'
       - id: check-yaml
       - id: check-toml
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.12.0
+    rev: 0.12.1
     hooks:
       - id: uv-lock
   - repo: https://github.com/woodruffw/zizmor-pre-commit
-    rev: v1.28.0
+    rev: v1.29.0
     hooks:
       - id: zizmor
         args: [--fix, --min-severity=medium]

@@ -71,6 +71,12 @@ Pallas-specific track outgrows itself, but there's no concrete plan for it. It
 would start from the same "emit MSL text, let Metal's compiler do the rest"
 contract this repo already provides.
 
+One exception: `src/metal_runtime/df32.{py,metal}` ships a validated
+double-single (float32x2) arithmetic prelude, since a numerics primitive that
+sits directly on top of "compile this MSL text" is in scope even though the
+Pallas codegen that would prepend it to a kernel is not. See
+`notes/float32x2.md`.
+
 ## Validate
 
 Whatever consumes this runtime should diff its results against a CPU/JAX
