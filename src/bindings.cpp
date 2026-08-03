@@ -2,16 +2,20 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -32,21 +36,36 @@ using HostArray = nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu>;
 // Grid and threadgroup extents accept a bare int for the common 1D case.
 using Extent = std::variant<size_t, std::vector<size_t>>;
 
-Dim3 to_dim3(const Extent& extent, const char* what) {
+class PyBuffer;
+
+// Host extents, or a Buffer of three uint32 threadgroup counts the GPU
+// reads at dispatch time (indirect).
+using GridArg = std::variant<size_t, std::vector<size_t>, PyBuffer*>;
+
+// A buffer binding, optionally at a byte offset into the allocation.
+using BufferArg = std::variant<PyBuffer*, std::pair<PyBuffer*, size_t>>;
+
+Dim3 to_dim3(size_t n, const char*) {
     Dim3 out;
-    if (const size_t* n = std::get_if<size_t>(&extent)) {
-        out.x = *n;
-        return out;
-    }
-    const std::vector<size_t>& dims = std::get<std::vector<size_t>>(extent);
+    out.x = n;
+    return out;
+}
+
+Dim3 to_dim3(const std::vector<size_t>& dims, const char* what) {
     if (dims.empty() || dims.size() > 3) {
         throw std::invalid_argument(std::string(what) + " must have 1 to 3 dimensions, got " +
                                     std::to_string(dims.size()));
     }
+    Dim3 out;
     out.x = dims[0];
     if (dims.size() > 1) out.y = dims[1];
     if (dims.size() > 2) out.z = dims[2];
     return out;
+}
+
+Dim3 to_dim3(const Extent& extent, const char* what) {
+    if (const size_t* n = std::get_if<size_t>(&extent)) return to_dim3(*n, what);
+    return to_dim3(std::get<std::vector<size_t>>(extent), what);
 }
 
 DType from_dlpack(nb::dlpack::dtype dt) {
@@ -68,6 +87,24 @@ DType from_dlpack(nb::dlpack::dtype dt) {
 }
 
 nb::dlpack::dtype to_dlpack(DType dt) { return nb::dlpack::dtype{dt.code, dt.bits, 1}; }
+
+// A wrong-width scalar doesn't fail, the kernel just reads garbage; float64
+// (numpy's default) gets its own message.
+void check_scalar_dtype(const HostArray& scalar, size_t position) {
+    nb::dlpack::dtype dt = scalar.dtype();
+    if (dt.code == DType::Float && dt.bits == 64 && dt.lanes == 1) {
+        throw std::invalid_argument(
+            "scalars[" + std::to_string(position) +
+            "] is a float64, numpy's default: Metal has no double-precision type, and a kernel "
+            "expecting a 4-byte scalar would silently read half of it. Pass an explicit width, "
+            "e.g. numpy.float32(value).");
+    }
+    try {
+        from_dlpack(dt);
+    } catch (const std::invalid_argument& e) {
+        throw std::invalid_argument("scalars[" + std::to_string(position) + "]: " + e.what());
+    }
+}
 
 size_t checked_element_count(const std::vector<size_t>& shape) {
     size_t count = 1;
@@ -120,7 +157,31 @@ class PyBuffer {
     // uninitialized, cheap next to the upload path it replaces, and it rules
     // out reading back garbage from a kernel that misses an element.
     static PyBuffer zeros(std::vector<size_t> shape, const std::string& dtype) {
-        return PyBuffer(std::move(shape), dtype_from_name(dtype));
+        return PyBuffer(std::move(shape), dtype_from_name(dtype), /*zero_fill=*/true);
+    }
+
+    // Uninitialized: no memset, for outputs a kernel overwrites entirely.
+    static PyBuffer empty(std::vector<size_t> shape, const std::string& dtype) {
+        return PyBuffer(std::move(shape), dtype_from_name(dtype), /*zero_fill=*/false);
+    }
+
+    // Refills the allocation in place. Reinterprets via `dtype` like the
+    // constructor; shape may differ, byte count may not.
+    void copy_from(const HostArray& array, const std::optional<std::string>& dtype) {
+        DType incoming = resolve_dtype(array, dtype);
+        if (incoming != dtype_) {
+            throw std::invalid_argument(std::string("copy_from(): array resolves to dtype '") +
+                                        dtype_name(incoming) + "', but this buffer holds '" +
+                                        this->dtype() +
+                                        "'; pass dtype=... to relabel, or match the array dtype");
+        }
+        if (array.nbytes() != nbytes()) {
+            throw std::invalid_argument("copy_from(): array has " + std::to_string(array.nbytes()) +
+                                        " bytes, but this buffer holds " +
+                                        std::to_string(nbytes()) +
+                                        "; copy_from cannot resize an allocation");
+        }
+        std::memcpy(buffer_->contents(), array.data(), array.nbytes());
     }
 
     // `owner` ties the returned array's lifetime to this PyBuffer so it can't
@@ -161,11 +222,11 @@ class PyBuffer {
     }
 
    private:
-    PyBuffer(std::vector<size_t> shape, DType dtype)
+    PyBuffer(std::vector<size_t> shape, DType dtype, bool zero_fill)
         : shape_(std::move(shape)),
           dtype_(dtype),
           buffer_(std::make_unique<Buffer>(runtime().device(), nbytes())) {
-        std::memset(buffer_->contents(), 0, nbytes());
+        if (zero_fill) std::memset(buffer_->contents(), 0, nbytes());
     }
 
     std::vector<size_t> shape_;
@@ -173,19 +234,59 @@ class PyBuffer {
     std::unique_ptr<Buffer> buffer_;
 };
 
+// bool/int/float coerce to the declared MSL type at specialization; a numpy
+// scalar pins an exact width that must match the declaration.
+FunctionConstants parse_constants(const nb::dict& constants) {
+    FunctionConstants out;
+    out.reserve(constants.size());
+    for (auto [key, value] : constants) {
+        FunctionConstant c;
+        c.name = nb::cast<std::string>(key);
+        // bool before int: Python bools are ints.
+        if (nb::isinstance<nb::bool_>(value)) {
+            c.kind = FunctionConstant::Kind::Bool;
+            c.bool_value = nb::cast<bool>(value);
+        } else if (nb::isinstance<nb::int_>(value)) {
+            c.kind = FunctionConstant::Kind::Int;
+            c.int_value = nb::cast<long long>(value);
+        } else if (nb::isinstance<nb::float_>(value)) {
+            c.kind = FunctionConstant::Kind::Float;
+            c.float_value = nb::cast<double>(value);
+        } else {
+            HostArray scalar;
+            if (!nb::try_cast<HostArray>(value, scalar) || scalar.size() != 1) {
+                throw std::invalid_argument(
+                    "function constant '" + c.name +
+                    "' must be a bool, int, float, or a single numpy scalar");
+            }
+            c.kind = FunctionConstant::Kind::Exact;
+            c.dtype = from_dlpack(scalar.dtype());
+            std::memcpy(c.value.data(), scalar.data(), c.dtype.itemsize());
+        }
+        out.push_back(std::move(c));
+    }
+    // Sorted so {a,b} and {b,a} hit the same pipeline cache entry.
+    std::sort(out.begin(), out.end(),
+              [](const FunctionConstant& a, const FunctionConstant& b) { return a.name < b.name; });
+    return out;
+}
+
 class PyKernel {
    public:
     PyKernel(const std::string& msl_source, const std::string& function_name, MathMode math_mode,
-             const std::map<std::string, std::string>& defines)
+             const std::map<std::string, std::string>& defines, const nb::dict& constants)
         : options_{math_mode, defines},
           library_(runtime().library_for(msl_source, options_)),
-          pipeline_(runtime().device(), *library_, function_name),
-          function_name_(function_name) {}
+          pipeline_(library_->pipeline_for(function_name, parse_constants(constants))),
+          function_name_(function_name) {
+        for (auto [key, value] : constants) constants_[key] = value;
+    }
 
     MathMode math_mode() const { return options_.math_mode; }
     const std::map<std::string, std::string>& defines() const { return options_.defines; }
+    const nb::dict& constants() const { return constants_; }
 
-    ComputePipeline& pipeline() { return pipeline_; }
+    ComputePipeline& pipeline() { return *pipeline_; }
     const std::string& function_name() const { return function_name_; }
 
    private:
@@ -195,8 +296,10 @@ class PyKernel {
     // Held, not just borrowed: the library cache evicts, and a pipeline built
     // from an evicted Library must not be the thing that discovers it.
     std::shared_ptr<Library> library_;
-    ComputePipeline pipeline_;
+    // Shared with the library's pipeline cache.
+    std::shared_ptr<ComputePipeline> pipeline_;
     std::string function_name_;
+    nb::dict constants_;
 };
 
 // A Launch plus everything it points into. The Python objects behind the
@@ -209,40 +312,73 @@ struct PreparedLaunch {
     std::vector<HostArray> scalars;
 };
 
-PreparedLaunch prepare(PyKernel& kernel, const Extent& grid,
+PreparedLaunch prepare(PyKernel& kernel, const GridArg& grid,
                        const std::optional<Extent>& threadgroup,
-                       const std::vector<PyBuffer*>& buffers, std::vector<HostArray> scalars,
-                       const std::vector<size_t>& threadgroup_memory) {
+                       const std::vector<BufferArg>& buffers, std::vector<HostArray> scalars,
+                       const std::vector<size_t>& threadgroup_memory, size_t indirect_offset) {
     PreparedLaunch prepared;
     prepared.scalars = std::move(scalars);
 
     prepared.launch.pipeline = &kernel.pipeline();
-    prepared.launch.grid = to_dim3(grid, "grid");
-    prepared.launch.threadgroup = threadgroup
-                                      ? to_dim3(*threadgroup, "threadgroup")
-                                      : kernel.pipeline().default_threadgroup(prepared.launch.grid);
     prepared.launch.threadgroup_memory = threadgroup_memory;
-
     prepared.keepalive.push_back(nb::find(kernel));
+
+    if (PyBuffer* const* indirect = std::get_if<PyBuffer*>(&grid)) {
+        if (!*indirect) throw std::invalid_argument("grid is None");
+        if (!threadgroup) {
+            throw std::invalid_argument(
+                "an indirect grid needs an explicit threadgroup size: the buffer holds "
+                "threadgroup counts, so there is no thread total to derive one from");
+        }
+        prepared.launch.indirect_grid = (*indirect)->buffer();
+        prepared.launch.indirect_offset = indirect_offset;
+        prepared.launch.threadgroup = to_dim3(*threadgroup, "threadgroup");
+        prepared.keepalive.push_back(nb::find(**indirect));
+    } else {
+        if (indirect_offset != 0) {
+            throw std::invalid_argument(
+                "indirect_offset is only meaningful when grid is a Buffer of threadgroup counts");
+        }
+        if (const size_t* n = std::get_if<size_t>(&grid)) {
+            prepared.launch.grid = to_dim3(*n, "grid");
+        } else {
+            prepared.launch.grid = to_dim3(std::get<std::vector<size_t>>(grid), "grid");
+        }
+        prepared.launch.threadgroup =
+            threadgroup ? to_dim3(*threadgroup, "threadgroup")
+                        : kernel.pipeline().default_threadgroup(prepared.launch.grid);
+    }
+
     prepared.launch.buffers.reserve(buffers.size());
-    for (PyBuffer* b : buffers) {
-        if (!b) throw std::invalid_argument("buffers contains None");
-        prepared.launch.buffers.push_back(b->buffer());
-        prepared.keepalive.push_back(nb::find(*b));
+    for (const BufferArg& arg : buffers) {
+        PyBuffer* buffer = nullptr;
+        size_t offset = 0;
+        if (PyBuffer* const* plain = std::get_if<PyBuffer*>(&arg)) {
+            buffer = *plain;
+        } else {
+            const auto& [b, o] = std::get<std::pair<PyBuffer*, size_t>>(arg);
+            buffer = b;
+            offset = o;
+        }
+        if (!buffer) throw std::invalid_argument("buffers contains None");
+        prepared.launch.buffers.emplace_back(buffer->buffer(), offset);
+        prepared.keepalive.push_back(nb::find(*buffer));
     }
 
     prepared.launch.scalars.reserve(prepared.scalars.size());
-    for (const HostArray& scalar : prepared.scalars) {
+    for (size_t i = 0; i < prepared.scalars.size(); ++i) {
+        const HostArray& scalar = prepared.scalars[i];
+        check_scalar_dtype(scalar, i);
         prepared.launch.scalars.emplace_back(scalar.data(), scalar.nbytes());
     }
     return prepared;
 }
 
-void run(PyKernel& kernel, const Extent& grid, const std::optional<Extent>& threadgroup,
-         const std::vector<PyBuffer*>& buffers, std::vector<HostArray> scalars,
-         const std::vector<size_t>& threadgroup_memory) {
-    PreparedLaunch prepared =
-        prepare(kernel, grid, threadgroup, buffers, std::move(scalars), threadgroup_memory);
+void run(PyKernel& kernel, const GridArg& grid, const std::optional<Extent>& threadgroup,
+         const std::vector<BufferArg>& buffers, std::vector<HostArray> scalars,
+         const std::vector<size_t>& threadgroup_memory, size_t indirect_offset) {
+    PreparedLaunch prepared = prepare(kernel, grid, threadgroup, buffers, std::move(scalars),
+                                      threadgroup_memory, indirect_offset);
     // Released only around the blocking part, and only after every Python
     // object the launch touches is pinned above.
     nb::gil_scoped_release release;
@@ -253,17 +389,28 @@ void run(PyKernel& kernel, const Extent& grid, const std::optional<Extent>& thre
 // for the whole sequence.
 class PyBatch {
    public:
-    PyBatch() : batch_(std::make_unique<CommandBatch>(runtime().queue())) {}
+    explicit PyBatch(bool concurrent)
+        : batch_(std::make_unique<CommandBatch>(runtime().queue(), concurrent)) {}
 
-    void add(PyKernel& kernel, const Extent& grid, const std::optional<Extent>& threadgroup,
-             const std::vector<PyBuffer*>& buffers, std::vector<HostArray> scalars,
-             const std::vector<size_t>& threadgroup_memory) {
-        PreparedLaunch prepared =
-            prepare(kernel, grid, threadgroup, buffers, std::move(scalars), threadgroup_memory);
+    void add(PyKernel& kernel, const GridArg& grid, const std::optional<Extent>& threadgroup,
+             const std::vector<BufferArg>& buffers, std::vector<HostArray> scalars,
+             const std::vector<size_t>& threadgroup_memory, size_t indirect_offset) {
+        PreparedLaunch prepared = prepare(kernel, grid, threadgroup, buffers, std::move(scalars),
+                                          threadgroup_memory, indirect_offset);
         batch_->add(prepared.launch);
         // The batch is committed later, so its buffers have to stay alive
-        // until then, not just until this call returns.
-        for (nb::object& obj : prepared.keepalive) keepalive_.push_back(std::move(obj));
+        // until then, not just until this call returns. Deduplicated: a
+        // stepping loop re-adds the same kernel and buffers per launch.
+        for (nb::object& obj : prepared.keepalive) {
+            if (pinned_.insert(obj.ptr()).second) keepalive_.push_back(std::move(obj));
+        }
+    }
+
+    void barrier() { batch_->barrier(); }
+
+    void commit() {
+        nb::gil_scoped_release release;
+        batch_->commit();
     }
 
     void wait() {
@@ -272,18 +419,23 @@ class PyBatch {
             batch_->wait();
         }
         keepalive_.clear();
+        pinned_.clear();
     }
+
+    std::optional<double> gpu_time() const { return batch_->gpu_time(); }
 
    private:
     std::unique_ptr<CommandBatch> batch_;
     std::vector<nb::object> keepalive_;
+    std::unordered_set<PyObject*> pinned_;
 };
 
-#define METAL_RUNTIME_LAUNCH_PARAMS                                                    \
-    "kernel: Kernel, grid: int | Sequence[int], "                                      \
-    "threadgroup: int | Sequence[int] | None = None, buffers: Sequence[Buffer] = [], " \
-    "scalars: Sequence[numpy.ndarray | numpy.generic] = [], "                          \
-    "threadgroup_memory: Sequence[int] = []"
+#define METAL_RUNTIME_LAUNCH_PARAMS                           \
+    "kernel: Kernel, grid: int | Sequence[int] | Buffer, "    \
+    "threadgroup: int | Sequence[int] | None = None, "        \
+    "buffers: Sequence[Buffer | tuple[Buffer, int]] = [], "   \
+    "scalars: Sequence[numpy.ndarray | numpy.generic] = [], " \
+    "threadgroup_memory: Sequence[int] = [], indirect_offset: int = 0"
 
 constexpr const char* kLaunchSignature = "def run(" METAL_RUNTIME_LAUNCH_PARAMS ") -> None";
 constexpr const char* kAddSignature = "def add(self, " METAL_RUNTIME_LAUNCH_PARAMS ") -> None";
@@ -295,6 +447,8 @@ nb::dict device_info() {
     info["unified_memory"] = rt.has_unified_memory();
     info["recommended_max_working_set_size"] = rt.recommended_max_working_set_size();
     info["max_threads_per_threadgroup"] = rt.max_threads_per_threadgroup();
+    info["max_threadgroup_memory_length"] = rt.max_threadgroup_memory_length();
+    info["max_buffer_length"] = rt.max_buffer_length();
     info["supports_non_uniform_threadgroups"] = rt.supports_non_uniform_threadgroups();
     return info;
 }
@@ -328,7 +482,24 @@ NB_MODULE(_core, m) {
         .def(nb::init<HostArray, const std::optional<std::string>&>(), "array"_a,
              "dtype"_a = nb::none())
         .def_static("zeros", &PyBuffer::zeros, "shape"_a, "dtype"_a = "float32")
+        .def_static("empty", &PyBuffer::empty, "shape"_a, "dtype"_a = "float32")
+        .def("copy_from", &PyBuffer::copy_from, "array"_a, "dtype"_a = nb::none())
         .def("to_numpy", &PyBuffer::to_numpy, "dtype"_a = nb::none())
+        .def(
+            "__dlpack__",
+            [](PyBuffer& b, nb::kwargs kwargs) {
+                // Delegates to the numpy view: same memory and lifetime,
+                // and numpy speaks the full protocol.
+                nb::object view = nb::cast(b.to_numpy(std::nullopt));
+                nb::object dlpack = view.attr("__dlpack__");
+                PyObject* result = PyObject_Call(dlpack.ptr(), nb::tuple().ptr(), kwargs.ptr());
+                if (!result) throw nb::python_error();
+                return nb::steal(result);
+            },
+            nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"))
+        .def("__dlpack_device__",
+             // (kDLCPU, 0): unified memory, so the bytes are host-addressable.
+             [](PyBuffer&) { return nb::make_tuple(1, 0); })
         .def_prop_ro("shape",
                      [](const PyBuffer& b) {
                          nb::list dims;
@@ -339,7 +510,10 @@ NB_MODULE(_core, m) {
         .def_prop_ro("size", &PyBuffer::size)
         .def_prop_ro("nbytes", &PyBuffer::nbytes)
         .def("__len__",
-             [](const PyBuffer& b) { return b.shape().empty() ? size_t(1) : b.shape()[0]; })
+             [](const PyBuffer& b) {
+                 if (b.shape().empty()) throw nb::type_error("len() of unsized object");
+                 return b.shape()[0];
+             })
         .def("__repr__", [](const PyBuffer& b) {
             std::string out = "Buffer(shape=(";
             for (size_t i = 0; i < b.shape().size(); ++i) {
@@ -359,35 +533,46 @@ NB_MODULE(_core, m) {
         .str_value("SAFE", MathMode::Safe, "safe",
                    "IEEE semantics. Required for compensated summation and double-single "
                    "arithmetic, whose error terms FAST is free to fold away.")
-        .str_value("RELAXED", MathMode::Relaxed, "relaxed")
+        .str_value("RELAXED", MathMode::Relaxed, "relaxed",
+                   "Permits reassociation like FAST (so it also deletes compensated "
+                   "arithmetic), but keeps infinities and NaNs well-defined instead of "
+                   "assuming they never occur.")
         .str_value("FAST", MathMode::Fast, "fast",
                    "Metal's default: permits reassociation and flushes denormals.");
 
     nb::class_<PyKernel>(m, "Kernel")
         .def(nb::init<const std::string&, const std::string&, MathMode,
-                      const std::map<std::string, std::string>&>(),
+                      const std::map<std::string, std::string>&, const nb::dict&>(),
              "msl_source"_a, "function_name"_a, "math_mode"_a = MathMode::Fast,
-             "defines"_a = std::map<std::string, std::string>())
+             "defines"_a = std::map<std::string, std::string>(), "constants"_a = nb::dict())
         .def_prop_ro("function_name", &PyKernel::function_name)
         .def_prop_ro("math_mode", &PyKernel::math_mode)
         .def_prop_ro("defines", &PyKernel::defines)
+        .def_prop_ro("constants", &PyKernel::constants)
         .def_prop_ro("max_threads_per_threadgroup",
                      [](PyKernel& k) { return k.pipeline().max_threads_per_threadgroup(); })
         .def_prop_ro("thread_execution_width",
                      [](PyKernel& k) { return k.pipeline().thread_execution_width(); })
+        .def_prop_ro("static_threadgroup_memory_length",
+                     [](PyKernel& k) { return k.pipeline().static_threadgroup_memory_length(); })
         .def("__repr__",
              [](PyKernel& k) { return "Kernel(function_name='" + k.function_name() + "')"; });
 
     m.def("run", &run, nb::sig(kLaunchSignature), "kernel"_a, "grid"_a,
-          "threadgroup"_a = nb::none(), "buffers"_a = std::vector<PyBuffer*>(),
-          "scalars"_a = std::vector<HostArray>(), "threadgroup_memory"_a = std::vector<size_t>());
+          "threadgroup"_a = nb::none(), "buffers"_a = std::vector<BufferArg>(),
+          "scalars"_a = std::vector<HostArray>(), "threadgroup_memory"_a = std::vector<size_t>(),
+          "indirect_offset"_a = 0);
 
     nb::class_<PyBatch>(m, "Batch")
-        .def(nb::init<>())
+        .def(nb::init<bool>(), "concurrent"_a = false)
         .def("add", &PyBatch::add, nb::sig(kAddSignature), "kernel"_a, "grid"_a,
-             "threadgroup"_a = nb::none(), "buffers"_a = std::vector<PyBuffer*>(),
-             "scalars"_a = std::vector<HostArray>(), "threadgroup_memory"_a = std::vector<size_t>())
+             "threadgroup"_a = nb::none(), "buffers"_a = std::vector<BufferArg>(),
+             "scalars"_a = std::vector<HostArray>(), "threadgroup_memory"_a = std::vector<size_t>(),
+             "indirect_offset"_a = 0)
+        .def("barrier", &PyBatch::barrier)
+        .def("commit", &PyBatch::commit)
         .def("wait", &PyBatch::wait)
+        .def_prop_ro("gpu_time", &PyBatch::gpu_time)
         .def(
             "__enter__", [](PyBatch& b) { return &b; }, nb::rv_policy::reference_internal,
             nb::sig("def __enter__(self) -> typing.Self"))
