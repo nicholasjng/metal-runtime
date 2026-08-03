@@ -28,6 +28,9 @@ provider = "scikit_build_core.metadata.regex"
 input = "src/metal_runtime/__init__.py"
 
 [dependency-groups]
+bench = [
+    "mew-bench",
+]
 build = [
     "nanobind>=2.13.0",
     "ruff>=0.16.0",  # for CMake's post-build stub formatting step.
@@ -37,12 +40,15 @@ test = [
     "pytest>=8",
     "ml-dtypes>=0.5", # to exercise the bfloat16 interop path, as NumPy can't represent that dtype.
 ]
+typing = [
+    "ty>=0.0.65",
+]
 
 [tool.uv]
 # Build against the project .venv so includes from Python packages (nanobind
-# etc.) in compile_commands.json survive across rebuilds -- same reasoning as mew.
+# etc.) in compile_commands.json survive across rebuilds.
 no-build-isolation-package = ["metal-runtime"]
-default-groups = ["build", "test"]
+default-groups = ["bench", "build", "test", "typing"]
 
 [tool.ruff]
 extend-exclude = ["ext"]
