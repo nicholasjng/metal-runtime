@@ -679,6 +679,497 @@ def test_missing_define_is_a_compile_error():
         mr.Kernel(_DEFINE_SOURCE, "scaled")  # SCALE never defined
 
 
+# --- scalar dtype validation --------------------------------------------------
+
+
+def test_float64_scalar_is_rejected_rather_than_misread():
+    """setBytes is untyped, so a float64 would silently bind as garbage."""
+    kernel = mr.Kernel(_AXPY_SOURCE, "axpy")
+    y = mr.Buffer.zeros([4])
+    with pytest.raises(ValueError, match="float64.*numpy.float32"):
+        mr.run(
+            kernel,
+            grid=4,
+            buffers=[y, mr.Buffer.zeros([4])],
+            scalars=[np.float64(2.0), np.uint32(4)],
+        )
+
+
+def test_unsupported_scalar_dtype_names_its_position():
+    kernel = mr.Kernel(_AXPY_SOURCE, "axpy")
+    y = mr.Buffer.zeros([4])
+    with pytest.raises(ValueError, match=r"scalars\[1\]"):
+        mr.run(
+            kernel,
+            grid=4,
+            buffers=[y, mr.Buffer.zeros([4])],
+            scalars=[np.float32(2.0), np.complex64(1.0)],
+        )
+
+
+# --- launch validation via reflection ------------------------------------------
+
+
+def test_missing_buffer_binding_names_the_argument():
+    """A forgotten buffer must fail host-side, not as a GPU fault."""
+    kernel = mr.Kernel(_AXPY_SOURCE, "axpy")
+    with pytest.raises(ValueError, match="'a' at buffer index 2"):
+        mr.run(kernel, grid=4, buffers=[mr.Buffer.zeros([4]), mr.Buffer.zeros([4])])
+
+
+def test_missing_threadgroup_memory_binding_names_the_argument():
+    kernel = mr.Kernel(_TG_REDUCE_SOURCE, "tg_sum")
+    with pytest.raises(ValueError, match="'scratch' at index 0"):
+        mr.run(
+            kernel,
+            grid=256,
+            threadgroup=256,
+            buffers=[mr.Buffer.zeros([256]), mr.Buffer.zeros([1])],
+        )
+
+
+def test_threadgroup_memory_over_device_budget_raises():
+    """Exceeding the budget downstream aborts the process, so it must raise here."""
+    kernel = mr.Kernel(_TG_REDUCE_SOURCE, "tg_sum")
+    limit = mr.device_info()["max_threadgroup_memory_length"]
+    with pytest.raises(ValueError, match="threadgroup memory"):
+        mr.run(
+            kernel,
+            grid=256,
+            threadgroup=256,
+            buffers=[mr.Buffer.zeros([256]), mr.Buffer.zeros([1])],
+            threadgroup_memory=[limit + 16],
+        )
+
+
+def test_huge_threadgroup_dimensions_cannot_wrap_past_the_limit():
+    """(2**32, 2**32) wraps the volume to 0; per-dimension checks must fire first."""
+    kernel = mr.Kernel(_FILL_TID_SOURCE, "fill_tid")
+    with pytest.raises(ValueError, match="threadgroup"):
+        mr.run(
+            kernel,
+            grid=4,
+            threadgroup=(2**32, 2**32),
+            buffers=[mr.Buffer.zeros([4])],
+        )
+
+
+# --- function constants ---------------------------------------------------------
+
+_CONSTANTS_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+constant float SCALE [[function_constant(0)]];
+constant uint  N     [[function_constant(1)]];
+constant bool  NEGATE [[function_constant(2)]];
+
+kernel void scaled(device float* buf [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+    if (tid >= N) return;
+    float v = float(tid) * SCALE;
+    buf[tid] = NEGATE ? -v : v;
+}
+"""
+
+
+def test_function_constants_specialize_without_recompiling(restore_cache_limit):
+    """Several specializations, one compiled library: the MSL front end runs once."""
+    mr.clear_library_cache()
+    for scale, negate in ((2.0, False), (5.0, True)):
+        buffer = mr.Buffer.zeros([8])
+        kernel = mr.Kernel(
+            _CONSTANTS_SOURCE,
+            "scaled",
+            constants={"SCALE": scale, "N": np.uint32(8), "NEGATE": negate},
+        )
+        mr.run(kernel, grid=8, buffers=[buffer])
+        expected = np.arange(8, dtype=np.float32) * scale * (-1.0 if negate else 1.0)
+        assert np.array_equal(buffer.to_numpy(), expected)
+    assert mr.library_cache_size() == 1
+
+
+def test_function_constants_accept_numpy_scalars_for_exact_widths():
+    buffer = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(
+        _CONSTANTS_SOURCE,
+        "scaled",
+        constants={
+            "SCALE": np.float32(3.0),
+            "N": np.uint32(4),
+            "NEGATE": np.bool_(False),
+        },
+    )
+    mr.run(kernel, grid=4, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), np.arange(4, dtype=np.float32) * 3.0)
+
+
+def test_kernel_reports_its_constants():
+    kernel = mr.Kernel(
+        _CONSTANTS_SOURCE,
+        "scaled",
+        constants={"SCALE": 1.0, "N": np.uint32(1), "NEGATE": False},
+    )
+    assert kernel.constants["SCALE"] == 1.0
+    assert kernel.constants["NEGATE"] is False
+
+
+def test_missing_required_constant_is_a_compile_error():
+    """Metal wouldn't fail this; the kernel would run with an undefined N."""
+    with pytest.raises(mr.CompileError, match="'N'.*not set"):
+        mr.Kernel(_CONSTANTS_SOURCE, "scaled", constants={"SCALE": 1.0})
+
+
+def test_omitting_constants_entirely_names_the_requirement():
+    """Unset constants mean undefined values, or a process abort via plain newFunction."""
+    with pytest.raises(mr.CompileError, match="requires function constant"):
+        mr.Kernel(_CONSTANTS_SOURCE, "scaled")
+
+
+def test_misspelled_constant_name_is_rejected():
+    with pytest.raises(mr.CompileError, match="'SCLAE' do not exist"):
+        mr.Kernel(
+            _CONSTANTS_SOURCE,
+            "scaled",
+            constants={"SCLAE": 1.0, "SCALE": 1.0, "N": np.uint32(1), "NEGATE": False},
+        )
+
+
+def test_plain_python_values_coerce_to_the_declared_types():
+    """A plain int lands on `constant uint` (etc.) via reflection on the
+    declared type -- no numpy spelling needed for the common case."""
+    buffer = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(
+        _CONSTANTS_SOURCE,
+        "scaled",
+        constants={"SCALE": 3.0, "N": 4, "NEGATE": True},
+    )
+    mr.run(kernel, grid=4, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), np.arange(4, dtype=np.float32) * -3.0)
+
+
+def test_exact_numpy_width_must_match_the_declaration():
+    with pytest.raises(mr.CompileError, match="declared as 'uint'.*'int32' scalar"):
+        mr.Kernel(
+            _CONSTANTS_SOURCE,
+            "scaled",
+            constants={"SCALE": 1.0, "N": np.int32(8), "NEGATE": False},
+        )
+
+
+def test_unknown_function_with_constants_raises_function_not_found():
+    with pytest.raises(mr.FunctionNotFoundError):
+        mr.Kernel(_CONSTANTS_SOURCE, "no_such_kernel", constants={"SCALE": 1.0})
+
+
+@pytest.mark.parametrize("value", [2**40, -1])
+def test_out_of_range_int_constant_is_rejected(value):
+    with pytest.raises(mr.CompileError, match="out of range"):
+        mr.Kernel(
+            _CONSTANTS_SOURCE,
+            "scaled",
+            constants={"SCALE": 1.0, "N": value, "NEGATE": False},
+        )
+
+
+def test_non_scalar_constant_is_rejected():
+    with pytest.raises(ValueError, match="single numpy scalar"):
+        mr.Kernel(_CONSTANTS_SOURCE, "scaled", constants={"N": "256"})
+
+
+_OPTIONAL_CONSTANT_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+constant uint N [[function_constant(0)]];
+constant bool HAS_N = is_function_constant_defined(N);
+
+kernel void fill_n(device float* buf [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+    uint n = HAS_N ? N : 2;
+    if (tid < n) buf[tid] = 1.0f;
+}
+"""
+
+
+def test_optional_constant_may_be_omitted():
+    """A constant guarded by is_function_constant_defined reports required=false."""
+    fallback = mr.Buffer.zeros([4])
+    mr.run(mr.Kernel(_OPTIONAL_CONSTANT_SOURCE, "fill_n"), grid=4, buffers=[fallback])
+    assert np.array_equal(fallback.to_numpy(), np.array([1, 1, 0, 0], dtype=np.float32))
+
+    overridden = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(_OPTIONAL_CONSTANT_SOURCE, "fill_n", constants={"N": 4})
+    mr.run(kernel, grid=4, buffers=[overridden])
+    assert np.array_equal(overridden.to_numpy(), np.ones(4, dtype=np.float32))
+
+
+_MACRO_CONSTANT_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+#define DECLARE_SCALE(name, idx) constant float name [[function_constant(idx)]];
+DECLARE_SCALE(SCALE, 0)
+
+kernel void scaled(device float* buf [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+    buf[tid] = float(tid) * SCALE;
+}
+"""
+
+
+def test_macro_generated_constants_are_validated():
+    """Reflection sees preprocessor-assembled declarations a source scan can't."""
+    with pytest.raises(mr.CompileError, match="'SCALE'"):
+        mr.Kernel(_MACRO_CONSTANT_SOURCE, "scaled")
+
+    buffer = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(_MACRO_CONSTANT_SOURCE, "scaled", constants={"SCALE": 2.0})
+    mr.run(kernel, grid=4, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), np.arange(4, dtype=np.float32) * 2.0)
+
+
+_MIXED_TU_SOURCE = (
+    _CONSTANTS_SOURCE
+    + """
+kernel void plain(device float* buf [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+    buf[tid] += 1.0f;
+}
+"""
+)
+
+
+def test_constants_are_scoped_per_entry_point():
+    """A kernel that uses no constants needs none, even if its TU declares some;
+    conversely, constants it doesn't use are rejected as unknown."""
+    buffer = mr.Buffer.zeros([4])
+    mr.run(mr.Kernel(_MIXED_TU_SOURCE, "plain"), grid=4, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), np.ones(4, dtype=np.float32))
+
+    with pytest.raises(mr.CompileError, match="'SCALE' do not exist"):
+        mr.Kernel(_MIXED_TU_SOURCE, "plain", constants={"SCALE": 1.0})
+
+
+# --- buffer offsets --------------------------------------------------------------
+
+
+def test_buffer_binds_at_an_offset():
+    """One arena, two logical arrays via a byte offset."""
+    arena = mr.Buffer(np.arange(8, dtype=np.float32))
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+    mr.run(kernel, grid=4, buffers=[(arena, 16)])
+    expected = np.arange(8, dtype=np.float32)
+    expected[4:] += 1.0
+    assert np.array_equal(arena.to_numpy(), expected)
+
+
+def test_offset_out_of_bounds_is_rejected():
+    arena = mr.Buffer(np.arange(4, dtype=np.float32))
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+    with pytest.raises(ValueError, match="out of bounds"):
+        mr.run(kernel, grid=1, buffers=[(arena, 64)])
+
+
+# --- async batches ----------------------------------------------------------------
+
+
+def test_commit_returns_before_wait_and_wait_collects():
+    """commit() is non-blocking; the host can encode the next batch meanwhile."""
+    buffer = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+
+    batch = mr.Batch()
+    for _ in range(3):
+        batch.add(kernel, grid=4, buffers=[buffer])
+    batch.commit()
+    batch.wait()
+    assert np.array_equal(buffer.to_numpy(), np.full(4, 3.0, dtype=np.float32))
+
+
+def test_two_batches_in_flight():
+    """Batches on one queue run in order, so later launches see earlier writes."""
+    buffer = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+
+    first = mr.Batch()
+    first.add(kernel, grid=4, buffers=[buffer])
+    first.commit()
+    second = mr.Batch()
+    second.add(kernel, grid=4, buffers=[buffer])
+    second.commit()
+    first.wait()
+    second.wait()
+    assert np.array_equal(buffer.to_numpy(), np.full(4, 2.0, dtype=np.float32))
+
+
+def test_add_after_commit_is_rejected():
+    batch = mr.Batch()
+    batch.add(
+        mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=4, buffers=[mr.Buffer.zeros([4])]
+    )
+    batch.commit()
+    with pytest.raises(mr.DispatchError):
+        batch.add(
+            mr.Kernel(_ADD_ONE_SOURCE, "add_one"),
+            grid=4,
+            buffers=[mr.Buffer.zeros([4])],
+        )
+
+
+def test_gpu_time_is_none_before_wait_and_positive_after():
+    buffer = mr.Buffer.zeros([64])
+    batch = mr.Batch()
+    batch.add(mr.Kernel(_FILL_TID_SOURCE, "fill_tid"), grid=64, buffers=[buffer])
+    assert batch.gpu_time is None
+    batch.wait()
+    gpu_time = batch.gpu_time
+    assert gpu_time is not None and gpu_time > 0.0
+
+
+def test_concurrent_batch_with_barrier_orders_dependent_launches():
+    """On a concurrent encoder, ordering exists only across a barrier."""
+    buffer = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+
+    batch = mr.Batch(concurrent=True)
+    batch.add(kernel, grid=4, buffers=[buffer])
+    batch.barrier()
+    batch.add(kernel, grid=4, buffers=[buffer])
+    batch.wait()
+    assert np.array_equal(buffer.to_numpy(), np.full(4, 2.0, dtype=np.float32))
+
+
+# --- indirect dispatch --------------------------------------------------------------
+
+_FILL_CONST_SOURCE = """
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void fill(device float* buf [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+    buf[tid] = 42.0f;
+}
+"""
+
+
+def test_indirect_dispatch_reads_threadgroup_counts_from_a_buffer():
+    """The GPU reads its own grid from device memory -- no host round trip."""
+    counts = mr.Buffer(np.array([2, 1, 1], dtype=np.uint32))
+    out = mr.Buffer.zeros([8])
+    kernel = mr.Kernel(_FILL_CONST_SOURCE, "fill")
+
+    mr.run(kernel, grid=counts, threadgroup=4, buffers=[out])
+
+    assert np.array_equal(out.to_numpy(), np.full(8, 42.0, dtype=np.float32))
+
+
+def test_indirect_dispatch_honors_the_offset():
+    # Two uint32 of padding, then the three counts.
+    counts = mr.Buffer(np.array([0, 0, 1, 1, 1], dtype=np.uint32))
+    out = mr.Buffer.zeros([4])
+    kernel = mr.Kernel(_FILL_CONST_SOURCE, "fill")
+
+    mr.run(kernel, grid=counts, threadgroup=4, buffers=[out], indirect_offset=8)
+
+    assert np.array_equal(out.to_numpy(), np.full(4, 42.0, dtype=np.float32))
+
+
+def test_indirect_dispatch_requires_an_explicit_threadgroup():
+    counts = mr.Buffer(np.array([1, 1, 1], dtype=np.uint32))
+    kernel = mr.Kernel(_FILL_CONST_SOURCE, "fill")
+    with pytest.raises(ValueError, match="explicit threadgroup"):
+        mr.run(kernel, grid=counts, buffers=[mr.Buffer.zeros([4])])
+
+
+def test_indirect_arguments_must_fit_the_buffer():
+    counts = mr.Buffer(np.array([1, 1], dtype=np.uint32))  # 8 bytes: too small
+    kernel = mr.Kernel(_FILL_CONST_SOURCE, "fill")
+    with pytest.raises(ValueError, match="indirect grid"):
+        mr.run(kernel, grid=counts, threadgroup=4, buffers=[mr.Buffer.zeros([4])])
+
+
+def test_indirect_offset_without_indirect_grid_is_rejected():
+    kernel = mr.Kernel(_FILL_CONST_SOURCE, "fill")
+    with pytest.raises(ValueError, match="indirect_offset"):
+        mr.run(kernel, grid=4, buffers=[mr.Buffer.zeros([4])], indirect_offset=8)
+
+
+# --- buffer reuse and interop --------------------------------------------------------
+
+
+def test_empty_skips_initialization_but_is_usable():
+    buffer = mr.Buffer.empty([8], "float32")
+    assert buffer.shape == (8,)
+    assert buffer.dtype == "float32"
+    mr.run(mr.Kernel(_FILL_TID_SOURCE, "fill_tid"), grid=8, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), np.arange(8, dtype=np.float32))
+
+
+def test_copy_from_reuses_the_allocation():
+    buffer = mr.Buffer(np.zeros(4, dtype=np.float32))
+    view = buffer.to_numpy()  # a live view; copy_from must write the same memory
+    buffer.copy_from(np.arange(4, dtype=np.float32))
+    assert np.array_equal(view, np.arange(4, dtype=np.float32))
+
+
+def test_copy_from_rejects_a_size_mismatch():
+    buffer = mr.Buffer.zeros([4])
+    with pytest.raises(ValueError, match="cannot resize"):
+        buffer.copy_from(np.zeros(8, dtype=np.float32))
+
+
+def test_copy_from_rejects_a_dtype_mismatch():
+    buffer = mr.Buffer.zeros([4], "float32")
+    with pytest.raises(ValueError, match="dtype"):
+        buffer.copy_from(np.zeros(4, dtype=np.int32))
+
+
+def test_copy_from_relabels_with_an_explicit_dtype():
+    buffer = mr.Buffer.zeros([4], "float32")
+    values = np.array([1.5, -2.25, 3.0, 0.5], dtype=np.float32)
+    buffer.copy_from(values.view(np.uint32), dtype="float32")
+    assert np.array_equal(buffer.to_numpy(), values)
+
+
+def test_dlpack_export_round_trips():
+    """np.from_dlpack (and jax.dlpack) consume the buffer zero-copy."""
+    buffer = mr.Buffer(np.arange(4, dtype=np.float32))
+    arr = np.from_dlpack(buffer)
+    assert np.array_equal(arr, np.arange(4, dtype=np.float32))
+    assert buffer.__dlpack_device__() == (1, 0)  # kDLCPU: host-addressable
+
+    mr.run(mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=4, buffers=[buffer])
+    assert np.array_equal(arr, np.arange(4, dtype=np.float32) + 1.0)
+
+
+def test_len_of_a_zero_dim_buffer_raises_like_numpy():
+    buffer = mr.Buffer(np.array(1.0, dtype=np.float32))
+    assert buffer.shape == ()
+    with pytest.raises(TypeError, match="unsized"):
+        len(buffer)
+
+
+# --- introspection additions ------------------------------------------------------
+
+
+def test_device_info_reports_memory_limits():
+    info = mr.device_info()
+    assert info["max_threadgroup_memory_length"] > 0
+    assert info["max_buffer_length"] > 0
+
+
+def test_kernel_reports_static_threadgroup_memory():
+    source = """
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void s(device float* b [[buffer(0)]], uint t [[thread_position_in_threadgroup]]) {
+        threadgroup float scratch[64];
+        scratch[t] = b[t];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        b[t] = scratch[63 - t];
+    }
+    """
+    kernel = mr.Kernel(source, "s")
+    assert kernel.static_threadgroup_memory_length >= 64 * 4
+    assert mr.Kernel(_FILL_TID_SOURCE, "fill_tid").static_threadgroup_memory_length == 0
+
+
 # --- readback aliasing -------------------------------------------------------
 
 
