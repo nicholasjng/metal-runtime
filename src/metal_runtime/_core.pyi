@@ -1,7 +1,7 @@
 import enum
 import types
 from collections.abc import Mapping, Sequence
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 
 import numpy
 from numpy.typing import NDArray
@@ -27,7 +27,16 @@ class Buffer:
     ) -> None: ...
     @staticmethod
     def zeros(shape: Sequence[int], dtype: str = "float32") -> Buffer: ...
+    @staticmethod
+    def empty(shape: Sequence[int], dtype: str = "float32") -> Buffer: ...
+    def copy_from(
+        self,
+        array: Annotated[NDArray, dict(order="C", device="cpu", writable=False)],
+        dtype: str | None = None,
+    ) -> None: ...
     def to_numpy(self, dtype: str | None = None) -> NDArray: ...
+    def __dlpack__(self, **kwargs) -> Any: ...
+    def __dlpack_device__(self) -> tuple: ...
     @property
     def shape(self) -> tuple: ...
     @property
@@ -49,6 +58,9 @@ class MathMode(enum.StrEnum):
     """
 
     RELAXED = "relaxed"
+    """
+    Permits reassociation like FAST (so it also deletes compensated arithmetic), but keeps infinities and NaNs well-defined instead of assuming they never occur.
+    """
 
     FAST = "fast"
     """Metal's default: permits reassociation and flushes denormals."""
@@ -60,6 +72,7 @@ class Kernel:
         function_name: str,
         math_mode: MathMode = MathMode.FAST,
         defines: Mapping[str, str] = {},
+        constants: dict = {},
     ) -> None: ...
     @property
     def function_name(self) -> str: ...
@@ -68,31 +81,41 @@ class Kernel:
     @property
     def defines(self) -> dict[str, str]: ...
     @property
+    def constants(self) -> dict: ...
+    @property
     def max_threads_per_threadgroup(self) -> int: ...
     @property
     def thread_execution_width(self) -> int: ...
+    @property
+    def static_threadgroup_memory_length(self) -> int: ...
 
 def run(
     kernel: Kernel,
-    grid: int | Sequence[int],
+    grid: int | Sequence[int] | Buffer,
     threadgroup: int | Sequence[int] | None = None,
-    buffers: Sequence[Buffer] = [],
+    buffers: Sequence[Buffer | tuple[Buffer, int]] = [],
     scalars: Sequence[numpy.ndarray | numpy.generic] = [],
     threadgroup_memory: Sequence[int] = [],
+    indirect_offset: int = 0,
 ) -> None: ...
 
 class Batch:
-    def __init__(self) -> None: ...
+    def __init__(self, concurrent: bool = False) -> None: ...
     def add(
         self,
         kernel: Kernel,
-        grid: int | Sequence[int],
+        grid: int | Sequence[int] | Buffer,
         threadgroup: int | Sequence[int] | None = None,
-        buffers: Sequence[Buffer] = [],
+        buffers: Sequence[Buffer | tuple[Buffer, int]] = [],
         scalars: Sequence[numpy.ndarray | numpy.generic] = [],
         threadgroup_memory: Sequence[int] = [],
+        indirect_offset: int = 0,
     ) -> None: ...
+    def barrier(self) -> None: ...
+    def commit(self) -> None: ...
     def wait(self) -> None: ...
+    @property
+    def gpu_time(self) -> float | None: ...
     def __enter__(self) -> Self: ...
     def __exit__(
         self,
