@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -14,6 +15,7 @@ class CommandQueue;
 class CommandBuffer;
 class ComputeCommandEncoder;
 class ComputePipelineState;
+class Function;
 }  // namespace MTL
 
 // The GPU rejected or aborted a committed command buffer. Distinct from a
@@ -29,20 +31,36 @@ struct Dim3 {
     size_t volume() const { return x * y * z; }
 };
 
+// A kernel argument the compiler reports as used, so a launch that misses it
+// fails host-side instead of faulting on the GPU.
+struct BindingInfo {
+    size_t index;
+    std::string name;
+};
+
 class ComputePipeline {
    public:
-    ComputePipeline(MTL::Device* device, const Library& library, const std::string& function_name);
+    // Takes ownership of `function` (releases it after building the pipeline).
+    // `label` is the entry-point name, used in error messages only.
+    ComputePipeline(MTL::Device* device, MTL::Function* function, const std::string& label);
     ~ComputePipeline();
     ComputePipeline(ComputePipeline&& other) noexcept;
     ComputePipeline(const ComputePipeline&) = delete;
     ComputePipeline& operator=(const ComputePipeline&) = delete;
 
     MTL::ComputePipelineState* handle() const { return pipeline_; }
+    const std::string& label() const { return label_; }
 
     // Hardware limits for this specific kernel, not the device: register
     // pressure can push a kernel's ceiling well below the device maximum.
     size_t max_threads_per_threadgroup() const;
     size_t thread_execution_width() const;
+    size_t static_threadgroup_memory_length() const;
+
+    // Used buffer and [[threadgroup(i)]] arguments; optimized-out ones are
+    // not listed.
+    const std::vector<BindingInfo>& buffer_bindings() const { return buffer_bindings_; }
+    const std::vector<BindingInfo>& threadgroup_bindings() const { return threadgroup_bindings_; }
 
     // A threadgroup that fills whole SIMD groups without exceeding the
     // kernel's own ceiling -- what dispatch() picks when the caller doesn't.
@@ -50,48 +68,68 @@ class ComputePipeline {
 
    private:
     MTL::ComputePipelineState* pipeline_ = nullptr;
+    std::string label_;
+    std::vector<BindingInfo> buffer_bindings_;
+    std::vector<BindingInfo> threadgroup_bindings_;
 };
 
-// One kernel launch. `buffers` bind at indices 0..n-1; `scalars` are copied
-// inline with setBytes at the indices that follow, so a kernel can take an
-// element count or a stride without the caller allocating a buffer per
-// scalar. `threadgroup_memory` sizes the threadgroup address space at
-// indices 0..m-1.
+// One kernel launch. Buffers bind at indices 0..n-1, each at a byte offset
+// into its allocation; scalars are copied inline with setBytes at the
+// indices after; threadgroup_memory sizes the threadgroup address space at
+// indices 0..m-1. If indirect_grid is set, grid is ignored and the GPU reads
+// three uint32 threadgroup counts from that buffer at indirect_offset when
+// it reaches the dispatch.
 struct Launch {
     ComputePipeline* pipeline = nullptr;
-    std::vector<Buffer*> buffers;
+    std::vector<std::pair<Buffer*, size_t>> buffers;  // (buffer, byte offset)
     std::vector<std::pair<const void*, size_t>> scalars;
     std::vector<size_t> threadgroup_memory;
     Dim3 grid;
     Dim3 threadgroup;
+    Buffer* indirect_grid = nullptr;
+    size_t indirect_offset = 0;
 };
 
-// Several launches encoded into one command buffer: one commit and one GPU
-// round-trip for the whole sequence instead of one per kernel. The encoder is
-// serial, so launches observe each other's writes in submission order without
-// explicit barriers.
+// Several launches in one command buffer: one commit for the sequence. The
+// default serial encoder orders launches; a concurrent encoder lets them
+// overlap, with ordering only across an explicit barrier().
 class CommandBatch {
    public:
-    explicit CommandBatch(MTL::CommandQueue* queue);
+    explicit CommandBatch(MTL::CommandQueue* queue, bool concurrent = false);
     ~CommandBatch();
     CommandBatch(CommandBatch&&) = delete;
     CommandBatch(const CommandBatch&) = delete;
     CommandBatch& operator=(const CommandBatch&) = delete;
 
-    // Validates `launch` against the pipeline's limits and the device's
-    // threadgroup capabilities, then encodes it. Throws before touching the
-    // encoder if the launch is invalid.
+    // Validates `launch` against the pipeline's limits, its compiler-reported
+    // argument list, and the device's threadgroup capabilities, then encodes
+    // it. Throws before touching the encoder if the launch is invalid.
     void add(const Launch& launch);
 
-    // Commits and blocks until the GPU is done. Throws DispatchError if the
-    // command buffer faulted. Calling it again is a no-op, so the destructor
-    // can rely on it.
+    // Orders buffer writes across it; only needed on a concurrent encoder.
+    void barrier();
+
+    // Closes the encoder and submits without blocking, so the next batch can
+    // be encoded while this one runs.
+    void commit();
+
+    // Commits if commit() hasn't run, then blocks until the GPU is done.
+    // Throws DispatchError if the command buffer faulted. Calling it again is
+    // a no-op, so the destructor can rely on it.
     void wait();
+
+    // Device-side execution seconds for the whole batch; set by wait().
+    std::optional<double> gpu_time() const { return gpu_time_; }
 
    private:
     MTL::CommandBuffer* command_buffer_ = nullptr;
     MTL::ComputeCommandEncoder* encoder_ = nullptr;
     bool committed_ = false;
+    bool waited_ = false;
+    // Device capabilities, read once in the constructor.
+    bool non_uniform_ = false;
+    size_t max_threadgroup_memory_ = 0;
+    std::optional<double> gpu_time_;
 };
 
 // A single-launch batch, committed and waited on immediately.
