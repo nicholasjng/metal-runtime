@@ -39,6 +39,12 @@ size_t MetalRuntime::max_threads_per_threadgroup() const {
     return (size_t)(device_->maxThreadsPerThreadgroup().width);
 }
 
+size_t MetalRuntime::max_threadgroup_memory_length() const {
+    return (size_t)(device_->maxThreadgroupMemoryLength());
+}
+
+size_t MetalRuntime::max_buffer_length() const { return (size_t)(device_->maxBufferLength()); }
+
 std::shared_ptr<Library> MetalRuntime::library_for(const std::string& msl_source,
                                                    const CompileOptions& options) {
     // Length-prefixed so the options blob can't be confused with the start of

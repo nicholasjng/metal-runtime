@@ -38,6 +38,8 @@ class MetalRuntime {
     bool has_unified_memory() const;
     size_t recommended_max_working_set_size() const;
     size_t max_threads_per_threadgroup() const;
+    size_t max_threadgroup_memory_length() const;
+    size_t max_buffer_length() const;
 
     // dispatchThreads() -- an arbitrary grid, with partial threadgroups at the
     // edges -- needs Apple family 4+ or Mac family 2. Older GPUs take the
