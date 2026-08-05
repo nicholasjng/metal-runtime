@@ -24,20 +24,30 @@ from metal_runtime._core import (
     supported_dtypes,
     supported_gpu_families,
 )
+from metal_runtime.source import (
+    DEFAULT_INCLUDES,
+    Fragment,
+    assemble,
+    build_source,
+)
 
 __all__ = [
+    "DEFAULT_INCLUDES",
     "AllocationError",
     "Batch",
     "Buffer",
     "CompileError",
     "DeviceError",
     "DispatchError",
+    "Fragment",
     "FunctionNotFoundError",
     "Kernel",
     "MathMode",
     "PipelineBuildError",
     "PipelineCacheError",
     "__version__",
+    "assemble",
+    "build_source",
     "clear_library_cache",
     "device_info",
     "device_name",

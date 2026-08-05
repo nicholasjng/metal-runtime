@@ -11,6 +11,8 @@ PRELUDE = (
     .read_text(encoding="utf-8")
 )
 
+FRAGMENT = mr.Fragment("df32", PRELUDE)
+
 
 def kernel(source: str, function_name: str, **kwargs) -> mr.Kernel:
     """
@@ -36,7 +38,8 @@ def kernel(source: str, function_name: str, **kwargs) -> mr.Kernel:
         A compiled `mr.Kernel` with `math_mode=mr.MathMode.SAFE` by default.
     """
     kwargs.setdefault("math_mode", mr.MathMode.SAFE)
-    return mr.Kernel(PRELUDE + source, function_name, **kwargs)
+    assembled = mr.assemble(FRAGMENT, mr.Fragment(function_name, source))
+    return mr.Kernel(assembled, function_name, **kwargs)
 
 
 def split(x: NDArray[np.float64]) -> NDArray[np.float32]:
