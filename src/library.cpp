@@ -39,6 +39,10 @@ MTL::MathMode to_mtl(MathMode mode) {
 // AutoreleaseScope, including the returned dictionary.
 MTL::CompileOptions* build_options(const CompileOptions& options) {
     MTL::CompileOptions* mtl_options = MTL::CompileOptions::alloc()->init()->autorelease();
+    // Request MSL 4.0 whenever the OS can compile it.
+    if (__builtin_available(macOS 26.0, *)) {
+        mtl_options->setLanguageVersion(MTL::LanguageVersion4_0);
+    }
     if (__builtin_available(macOS 15.0, *)) {
         mtl_options->setMathMode(to_mtl(options.math_mode));
     } else {

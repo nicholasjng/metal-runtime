@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -48,6 +49,12 @@ class MetalRuntime {
     // dispatchThreadgroups path instead, which needs the grid to divide
     // evenly by the threadgroup.
     bool supports_non_uniform_threadgroups() const { return non_uniform_threadgroups_; }
+
+    // The highest GPU family index this device supports, per independent GPU
+    // family group ("apple" -> 8, "metal" -> 4, ...). Each family index is documented
+    // as cumulative, so any existing family version prior to the given index
+    // may be assumed as supported.
+    std::map<std::string, int> supported_gpu_families() const;
 
     // Compiled libraries are keyed by source text *and* compile options.
     // Returns a shared_ptr rather than a reference into the map because

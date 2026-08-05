@@ -34,6 +34,26 @@ def device_info() -> dict:
         max_buffer_length, supports_non_uniform_threadgroups.
     """
 
+def supported_gpu_families() -> dict[str, int]:
+    """
+    Highest supported MTLGPUFamily index per family group, via
+    `-[MTLDevice supportsFamily:]`.
+
+    Groups: "apple" (chip generation), "mac" (legacy discrete/Intel),
+    "common" (cross-platform baseline), "metal" (Metal-N feature-set
+    shorthand). Each is cumulative -- supporting N implies every lower N
+    in that group -- so check a documented family floor with e.g.
+    `families.get("apple", 0) >= 9`. A missing key means unsupported.
+
+    Necessary, not sufficient: a specific optional feature can also be
+    gated behind a deployment target or language version this call
+    doesn't know about. Compiling is the only fully authoritative check.
+
+    Returns
+    -------
+    dict of str to int
+    """
+
 def supported_dtypes() -> str:
     """
     Comma-separated list of dtype names Buffer accepts.

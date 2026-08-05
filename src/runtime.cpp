@@ -40,6 +40,37 @@ std::string MetalRuntime::device_name() const {
 
 bool MetalRuntime::has_unified_memory() const { return device_->hasUnifiedMemory(); }
 
+namespace {
+
+struct GPUFamilyEntry {
+    const char* group;
+    int index;
+    MTL::GPUFamily family;
+};
+
+constexpr GPUFamilyEntry kGPUFamilyTable[] = {
+    {"apple", 1, MTL::GPUFamilyApple1},   {"apple", 2, MTL::GPUFamilyApple2},
+    {"apple", 3, MTL::GPUFamilyApple3},   {"apple", 4, MTL::GPUFamilyApple4},
+    {"apple", 5, MTL::GPUFamilyApple5},   {"apple", 6, MTL::GPUFamilyApple6},
+    {"apple", 7, MTL::GPUFamilyApple7},   {"apple", 8, MTL::GPUFamilyApple8},
+    {"apple", 9, MTL::GPUFamilyApple9},   {"apple", 10, MTL::GPUFamilyApple10},
+    {"mac", 2, MTL::GPUFamilyMac2},       {"common", 1, MTL::GPUFamilyCommon1},
+    {"common", 2, MTL::GPUFamilyCommon2}, {"common", 3, MTL::GPUFamilyCommon3},
+    {"metal", 3, MTL::GPUFamilyMetal3},   {"metal", 4, MTL::GPUFamilyMetal4},
+};
+
+}  // namespace
+
+std::map<std::string, int> MetalRuntime::supported_gpu_families() const {
+    std::map<std::string, int> out;
+    for (const auto& entry : kGPUFamilyTable) {
+        if (!device_->supportsFamily(entry.family)) continue;
+        auto [it, inserted] = out.try_emplace(entry.group, entry.index);
+        if (!inserted && entry.index > it->second) it->second = entry.index;
+    }
+    return out;
+}
+
 size_t MetalRuntime::recommended_max_working_set_size() const {
     return (size_t)(device_->recommendedMaxWorkingSetSize());
 }

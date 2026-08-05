@@ -18,6 +18,7 @@ from metal_runtime._core import (
     set_library_cache_limit,
     set_pipeline_cache_dir,
     supported_dtypes,
+    supported_gpu_families,
 )
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "set_library_cache_limit",
     "set_pipeline_cache_dir",
     "supported_dtypes",
+    "supported_gpu_families",
 ]
 
 __version__ = "0.1.0"
