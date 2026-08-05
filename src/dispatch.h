@@ -160,8 +160,8 @@ class CommandBatch {
     void commit();
 
     // Commits if commit() hasn't run, then blocks until the GPU is done.
-    // Throws DispatchError if the command buffer faulted. Calling it again is
-    // a no-op, so the destructor can rely on it.
+    // Throws DispatchError if the command buffer faulted. Safe to call repeatedly
+    // and from multiple threads: every caller blocks until completion.
     void wait();
 
     // Device-side execution seconds for the whole batch; set by wait().
@@ -179,8 +179,12 @@ class CommandBatch {
     std::optional<Timestamps> timestamps() const { return timestamps_; }
 
    private:
+    void commit_locked();
+
     MTL::CommandBuffer* command_buffer_ = nullptr;
     MTL::ComputeCommandEncoder* encoder_ = nullptr;
+    // Guards committed_, waited_, and the one-time timestamp capture.
+    std::mutex state_mutex_;
     bool committed_ = false;
     bool waited_ = false;
     // Device capabilities, read once in the constructor.

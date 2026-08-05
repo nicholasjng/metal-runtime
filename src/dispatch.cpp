@@ -315,6 +315,11 @@ void CommandBatch::barrier() {
 }
 
 void CommandBatch::commit() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    commit_locked();
+}
+
+void CommandBatch::commit_locked() {
     if (committed_) return;
     committed_ = true;
 
@@ -324,15 +329,26 @@ void CommandBatch::commit() {
 }
 
 void CommandBatch::wait() {
-    if (waited_) return;
-    commit();
-    waited_ = true;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        commit_locked();
+    }
+    {
+        // Every caller blocks until completion: waitUntilCompleted is
+        // thread-safe and returns immediately on a finished buffer, so
+        // repeated waits stay cheap without an early-out flag.
+        AutoreleaseScope scope;
+        command_buffer_->waitUntilCompleted();
+    }
 
-    AutoreleaseScope scope;
-    command_buffer_->waitUntilCompleted();
-    gpu_time_ = command_buffer_->GPUEndTime() - command_buffer_->GPUStartTime();
-    timestamps_ = Timestamps{command_buffer_->kernelStartTime(), command_buffer_->kernelEndTime(),
-                             command_buffer_->GPUStartTime(), command_buffer_->GPUEndTime()};
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!waited_) {
+        waited_ = true;
+        gpu_time_ = command_buffer_->GPUEndTime() - command_buffer_->GPUStartTime();
+        timestamps_ =
+            Timestamps{command_buffer_->kernelStartTime(), command_buffer_->kernelEndTime(),
+                       command_buffer_->GPUStartTime(), command_buffer_->GPUEndTime()};
+    }
 
     if (command_buffer_->status() == MTL::CommandBufferStatusError) {
         NS::Error* error = command_buffer_->error();
