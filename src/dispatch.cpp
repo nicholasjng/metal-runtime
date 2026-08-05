@@ -59,6 +59,10 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
         NS::Error* stage_error = nullptr;
         archive->addComputePipelineFunctions(descriptor, &stage_error);
     }
+    max_threads_per_threadgroup_ = pipeline_->maxTotalThreadsPerThreadgroup();
+    thread_execution_width_ = pipeline_->threadExecutionWidth();
+    static_threadgroup_memory_length_ = pipeline_->staticThreadgroupMemoryLength();
+
     if (reflection) {
         NS::Array* bindings = reflection->bindings();
         for (NS::UInteger i = 0; i < bindings->count(); ++i) {
@@ -82,30 +86,31 @@ ComputePipeline::ComputePipeline(ComputePipeline&& other) noexcept
     : pipeline_(other.pipeline_),
       label_(std::move(other.label_)),
       buffer_bindings_(std::move(other.buffer_bindings_)),
-      threadgroup_bindings_(std::move(other.threadgroup_bindings_)) {
+      threadgroup_bindings_(std::move(other.threadgroup_bindings_)),
+      max_threads_per_threadgroup_(other.max_threads_per_threadgroup_),
+      thread_execution_width_(other.thread_execution_width_),
+      static_threadgroup_memory_length_(other.static_threadgroup_memory_length_) {
     other.pipeline_ = nullptr;
 }
 
-size_t ComputePipeline::max_threads_per_threadgroup() const {
-    return pipeline_->maxTotalThreadsPerThreadgroup();
-}
+size_t ComputePipeline::max_threads_per_threadgroup() const { return max_threads_per_threadgroup_; }
 
-size_t ComputePipeline::thread_execution_width() const { return pipeline_->threadExecutionWidth(); }
+size_t ComputePipeline::thread_execution_width() const { return thread_execution_width_; }
 
 size_t ComputePipeline::static_threadgroup_memory_length() const {
-    return pipeline_->staticThreadgroupMemoryLength();
+    return static_threadgroup_memory_length_;
 }
 
 void ComputePipeline::validate_shape(size_t binding_count,
                                      const std::vector<size_t>& threadgroup_memory, Dim3 tg,
                                      size_t device_max_threadgroup_memory) {
-    std::string key = std::to_string(binding_count) + "|" + to_string(tg) + "|";
-    for (size_t length : threadgroup_memory) key += std::to_string(length) + ",";
-    key += "|" + std::to_string(device_max_threadgroup_memory);
+    LaunchShape shape{binding_count, device_max_threadgroup_memory, tg, threadgroup_memory};
 
     {
         std::lock_guard<std::mutex> lock(shape_cache_mutex_);
-        if (validated_shapes_.count(key)) return;
+        for (const LaunchShape& seen : validated_shapes_) {
+            if (seen == shape) return;
+        }
     }
 
     if (tg.x == 0 || tg.y == 0 || tg.z == 0) {
@@ -164,7 +169,9 @@ void ComputePipeline::validate_shape(size_t binding_count,
     }
 
     std::lock_guard<std::mutex> lock(shape_cache_mutex_);
-    validated_shapes_.insert(std::move(key));
+    if (validated_shapes_.size() < kMaxValidatedShapes) {
+        validated_shapes_.push_back(std::move(shape));
+    }
 }
 
 Dim3 ComputePipeline::default_threadgroup(Dim3 grid) const {
@@ -324,6 +331,8 @@ void CommandBatch::wait() {
     AutoreleaseScope scope;
     command_buffer_->waitUntilCompleted();
     gpu_time_ = command_buffer_->GPUEndTime() - command_buffer_->GPUStartTime();
+    timestamps_ = Timestamps{command_buffer_->kernelStartTime(), command_buffer_->kernelEndTime(),
+                             command_buffer_->GPUStartTime(), command_buffer_->GPUEndTime()};
 
     if (command_buffer_->status() == MTL::CommandBufferStatusError) {
         NS::Error* error = command_buffer_->error();

@@ -1103,6 +1103,52 @@ def test_gpu_time_is_none_before_wait_and_positive_after():
     assert gpu_time is not None and gpu_time > 0.0
 
 
+def test_timestamps_are_none_before_wait_and_ordered_after():
+    buffer = mr.Buffer.zeros([64])
+    batch = mr.Batch()
+    batch.add(mr.Kernel(_FILL_TID_SOURCE, "fill_tid"), grid=64, buffers=[buffer])
+    assert batch.timestamps is None
+    batch.wait()
+
+    stamps = batch.timestamps
+    assert stamps is not None
+    assert set(stamps) == {"kernel_start", "kernel_end", "gpu_start", "gpu_end"}
+    # One epoch, and the command buffer moves through the driver before the
+    # GPU runs it -- which is what makes the differences meaningful.
+    assert (
+        stamps["kernel_start"]
+        <= stamps["kernel_end"]
+        <= stamps["gpu_start"]
+        <= stamps["gpu_end"]
+    )
+    assert batch.gpu_time == pytest.approx(stamps["gpu_end"] - stamps["gpu_start"])
+
+
+def test_repeated_launches_at_differing_shapes_all_validate():
+    """The shape cache holds several entries, not just the most recent one.
+
+    Alternating shapes must each stay validated; a one-entry cache would
+    re-run validation every launch, and a broken comparison would let a
+    genuinely invalid shape through on its second appearance.
+    """
+    buffer = mr.Buffer.zeros([64])
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+    with mr.Batch() as batch:
+        for _ in range(4):
+            for threadgroup in (1, 2, 4):
+                batch.add(kernel, grid=64, threadgroup=threadgroup, buffers=[buffer])
+    assert np.array_equal(buffer.to_numpy(), np.full(64, 12.0, dtype=np.float32))
+
+    # Still rejected after the valid shapes above populated the cache.
+    with pytest.raises(ValueError, match="per threadgroup"):
+        mr.run(
+            kernel,
+            grid=64,
+            threadgroup=kernel.max_threads_per_threadgroup + 1,
+            buffers=[buffer],
+        )
+
+
 def test_concurrent_batch_with_barrier_orders_dependent_launches():
     """On a concurrent encoder, ordering exists only across a barrier."""
     buffer = mr.Buffer.zeros([4])

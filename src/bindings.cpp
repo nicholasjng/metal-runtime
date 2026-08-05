@@ -449,6 +449,17 @@ class PyBatch {
 
     std::optional<double> gpu_time() const { return batch_->gpu_time(); }
 
+    std::optional<nb::dict> timestamps() const {
+        std::optional<CommandBatch::Timestamps> t = batch_->timestamps();
+        if (!t) return std::nullopt;
+        nb::dict out;
+        out["kernel_start"] = t->kernel_start;
+        out["kernel_end"] = t->kernel_end;
+        out["gpu_start"] = t->gpu_start;
+        out["gpu_end"] = t->gpu_end;
+        return out;
+    }
+
    private:
     std::unique_ptr<CommandBatch> batch_;
     std::vector<nb::object> keepalive_;
@@ -860,6 +871,19 @@ DispatchError
 )doc")
         .def_prop_ro("gpu_time", &PyBatch::gpu_time,
                      "Device-side execution seconds for the whole batch, set by wait().")
+        .def_prop_ro("timestamps", &PyBatch::timestamps,
+                     R"doc(
+Command buffer timestamps in one common epoch (seconds), or None
+before wait().
+
+Returns
+-------
+dict or None
+    Keys: kernel_start, kernel_end (driver), gpu_start, gpu_end
+    (device). `gpu_start - kernel_end` is how long the submission
+    waited for the GPU; wait()'s wall time minus
+    `gpu_end - kernel_start` is the host wake-up cost.
+)doc")
         .def(
             "__enter__", [](PyBatch& b) { return &b; }, nb::rv_policy::reference_internal,
             nb::sig("def __enter__(self) -> typing.Self"), "Returns self.")

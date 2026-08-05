@@ -4,7 +4,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -79,13 +78,45 @@ class ComputePipeline {
                         Dim3 threadgroup, size_t device_max_threadgroup_memory);
 
    private:
+    // The subset of a launch this validation actually depends on. Compared
+    // field-wise against the shapes already cleared, which is why it is a
+    // struct and not a serialized cache key: building one string per launch
+    // cost 173ns of the ~470ns encode, against 7ns for this comparison, and
+    // a launch loop re-validates the same shape every time.
+    struct LaunchShape {
+        size_t binding_count = 0;
+        size_t device_max_threadgroup_memory = 0;
+        Dim3 threadgroup;
+        std::vector<size_t> threadgroup_memory;
+
+        bool operator==(const LaunchShape& other) const {
+            return binding_count == other.binding_count &&
+                   device_max_threadgroup_memory == other.device_max_threadgroup_memory &&
+                   threadgroup.x == other.threadgroup.x && threadgroup.y == other.threadgroup.y &&
+                   threadgroup.z == other.threadgroup.z &&
+                   threadgroup_memory == other.threadgroup_memory;
+        }
+    };
+
     MTL::ComputePipelineState* pipeline_ = nullptr;
     std::string label_;
     std::vector<BindingInfo> buffer_bindings_;
     std::vector<BindingInfo> threadgroup_bindings_;
 
+    // Cached in the constructor: every launch reads these, and they are fixed
+    // for the life of the pipeline.
+    size_t max_threads_per_threadgroup_ = 0;
+    size_t thread_execution_width_ = 0;
+    size_t static_threadgroup_memory_length_ = 0;
+
+    // Linear-scanned rather than hashed: a caller uses a handful of distinct
+    // shapes per kernel, so a scan over a short vector beats hashing. Capped
+    // so that a caller which does vary its shape every launch degrades to
+    // re-validating (the pre-cache cost) instead of growing without bound and
+    // turning the scan quadratic.
+    static constexpr size_t kMaxValidatedShapes = 16;
     std::mutex shape_cache_mutex_;
-    std::unordered_set<std::string> validated_shapes_;
+    std::vector<LaunchShape> validated_shapes_;
 };
 
 // One kernel launch. Buffers bind at indices 0..n-1, each at a byte offset
@@ -136,6 +167,17 @@ class CommandBatch {
     // Device-side execution seconds for the whole batch; set by wait().
     std::optional<double> gpu_time() const { return gpu_time_; }
 
+    // The four command buffer timestamps, in one common epoch (seconds), so
+    // their differences separate driver submission from GPU execution from
+    // the host's own wake-up. Set by wait().
+    struct Timestamps {
+        double kernel_start = 0;  // driver began processing the submission
+        double kernel_end = 0;    // driver handed it to the GPU
+        double gpu_start = 0;     // GPU began executing
+        double gpu_end = 0;       // GPU finished
+    };
+    std::optional<Timestamps> timestamps() const { return timestamps_; }
+
    private:
     MTL::CommandBuffer* command_buffer_ = nullptr;
     MTL::ComputeCommandEncoder* encoder_ = nullptr;
@@ -145,6 +187,7 @@ class CommandBatch {
     bool non_uniform_ = false;
     size_t max_threadgroup_memory_ = 0;
     std::optional<double> gpu_time_;
+    std::optional<Timestamps> timestamps_;
 };
 
 // A single-launch batch, committed and waited on immediately.

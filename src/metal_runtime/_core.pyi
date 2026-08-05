@@ -412,6 +412,21 @@ class Batch:
     def gpu_time(self) -> float | None:
         """Device-side execution seconds for the whole batch, set by wait()."""
 
+    @property
+    def timestamps(self) -> dict | None:
+        """
+        Command buffer timestamps in one common epoch (seconds), or None
+        before wait().
+
+        Returns
+        -------
+        dict or None
+            Keys: kernel_start, kernel_end (driver), gpu_start, gpu_end
+            (device). `gpu_start - kernel_end` is how long the submission
+            waited for the GPU; wait()'s wall time minus
+            `gpu_end - kernel_start` is the host wake-up cost.
+        """
+
     def __enter__(self) -> Self:
         """Returns self."""
 
