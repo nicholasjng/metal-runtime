@@ -4,6 +4,7 @@
 #include <string>
 
 #include "metal.h"
+#include "runtime.h"
 
 namespace {
 
@@ -52,12 +53,18 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
     function->release();
     if (!pipeline_) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
-        throw std::runtime_error("failed to build compute pipeline: " + message);
+        throw PipelineBuildError("failed to build compute pipeline: " + message);
     }
     if (archive) {
-        // Not fatal: the pipeline above already built fine either way.
+        // Not fatal: the pipeline above already built fine either way. But a
+        // cache that silently never populates is indistinguishable from one
+        // that works, so record the failure for pipeline_cache_status().
         NS::Error* stage_error = nullptr;
-        archive->addComputePipelineFunctions(descriptor, &stage_error);
+        if (!archive->addComputePipelineFunctions(descriptor, &stage_error)) {
+            std::string message =
+                stage_error ? stage_error->localizedDescription()->utf8String() : "unknown error";
+            runtime().note_archive_add_failure(message);
+        }
     }
     max_threads_per_threadgroup_ = pipeline_->maxTotalThreadsPerThreadgroup();
     thread_execution_width_ = pipeline_->threadExecutionWidth();

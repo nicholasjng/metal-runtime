@@ -1,4 +1,5 @@
 from metal_runtime._core import (
+    AllocationError,
     Batch,
     Buffer,
     CompileError,
@@ -7,12 +8,15 @@ from metal_runtime._core import (
     FunctionNotFoundError,
     Kernel,
     MathMode,
+    PipelineBuildError,
+    PipelineCacheError,
     clear_library_cache,
     device_info,
     device_name,
     library_cache_limit,
     library_cache_size,
     pipeline_cache_dir,
+    pipeline_cache_status,
     run,
     save_pipeline_cache,
     set_library_cache_limit,
@@ -22,6 +26,7 @@ from metal_runtime._core import (
 )
 
 __all__ = [
+    "AllocationError",
     "Batch",
     "Buffer",
     "CompileError",
@@ -30,6 +35,8 @@ __all__ = [
     "FunctionNotFoundError",
     "Kernel",
     "MathMode",
+    "PipelineBuildError",
+    "PipelineCacheError",
     "__version__",
     "clear_library_cache",
     "device_info",
@@ -37,6 +44,7 @@ __all__ = [
     "library_cache_limit",
     "library_cache_size",
     "pipeline_cache_dir",
+    "pipeline_cache_status",
     "run",
     "save_pipeline_cache",
     "set_library_cache_limit",

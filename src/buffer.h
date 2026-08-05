@@ -1,10 +1,18 @@
 #pragma once
 #include <cstddef>
+#include <stdexcept>
 
 namespace MTL {
 class Device;
 class Buffer;
 }  // namespace MTL
+
+// Metal refused to allocate or wrap buffer memory (typically device memory
+// exhaustion or a request beyond maxBufferLength). Registered in Python
+// under MemoryError, so `except MemoryError` catches GPU and host OOM alike.
+struct AllocationError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 // Unified memory, so host and GPU read/write the same bytes.
 // This makes contents() a plain pointer, no upload/readback copy needed.

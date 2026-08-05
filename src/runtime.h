@@ -23,6 +23,18 @@ struct NoDeviceError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// Opening or writing the on-disk pipeline cache (MTL::BinaryArchive) failed.
+// An I/O problem, not a compile or dispatch one; registered in Python as OSError.
+struct PipelineCacheError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Non-fatal pipeline-cache staging diagnostics; see pipeline_cache_status().
+struct ArchiveAddStats {
+    size_t failures = 0;
+    std::string last_error;
+};
+
 // Default cap on cached libraries.
 inline constexpr size_t kDefaultLibraryCacheLimit = 256;
 
@@ -76,6 +88,12 @@ class MetalRuntime {
     // Explicit, not automatic on process exit.
     void save_pipeline_cache();
 
+    // Records a failed BinaryArchive::addComputePipelineFunctions call.
+    // Non-fatal by design (the pipeline itself built), but counted so a
+    // cache that never populates is observable instead of silent.
+    void note_archive_add_failure(const std::string& message);
+    ArchiveAddStats archive_add_stats() const;
+
     MTL::BinaryArchive* pipeline_archive() const;
 
    private:
@@ -94,6 +112,7 @@ class MetalRuntime {
 
     MTL::BinaryArchive* pipeline_archive_ = nullptr;
     std::string pipeline_cache_path_;
+    ArchiveAddStats archive_add_stats_;
 };
 
 MetalRuntime& runtime();

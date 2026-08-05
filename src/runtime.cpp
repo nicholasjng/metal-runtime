@@ -159,7 +159,7 @@ void MetalRuntime::set_pipeline_cache_dir(std::optional<std::string> path) {
         if (!archive) {
             std::string message =
                 error ? error->localizedDescription()->utf8String() : "unknown error";
-            throw std::runtime_error("failed to open pipeline cache at " + *path + ": " + message);
+            throw PipelineCacheError("failed to open pipeline cache at " + *path + ": " + message);
         }
         archive->retain();
     }
@@ -168,6 +168,18 @@ void MetalRuntime::set_pipeline_cache_dir(std::optional<std::string> path) {
     if (pipeline_archive_) pipeline_archive_->release();
     pipeline_archive_ = archive;
     pipeline_cache_path_ = path.value_or("");
+    archive_add_stats_ = {};
+}
+
+void MetalRuntime::note_archive_add_failure(const std::string& message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    archive_add_stats_.failures += 1;
+    archive_add_stats_.last_error = message;
+}
+
+ArchiveAddStats MetalRuntime::archive_add_stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return archive_add_stats_;
 }
 
 std::optional<std::string> MetalRuntime::pipeline_cache_dir() const {
@@ -183,7 +195,7 @@ void MetalRuntime::save_pipeline_cache() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!pipeline_archive_) {
-            throw std::runtime_error(
+            throw std::invalid_argument(
                 "no pipeline cache directory set; call set_pipeline_cache_dir() first");
         }
         archive = pipeline_archive_;
@@ -193,7 +205,7 @@ void MetalRuntime::save_pipeline_cache() {
     NS::Error* error = nullptr;
     if (!archive->serializeToURL(NS::URL::fileURLWithPath(p), &error)) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
-        throw std::runtime_error("failed to write pipeline cache to " + path + ": " + message);
+        throw PipelineCacheError("failed to write pipeline cache to " + path + ": " + message);
     }
 }
 

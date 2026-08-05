@@ -17,6 +17,7 @@ extern "C" {
 typedef struct MRLibrary MRLibrary;
 typedef struct MRPipeline MRPipeline;
 typedef struct MRBuffer MRBuffer;
+typedef struct MRBatch MRBatch;
 
 typedef enum MRStatus {
     MR_OK = 0,
@@ -26,6 +27,7 @@ typedef enum MRStatus {
     MR_ERROR_DISPATCH = 4,
     MR_ERROR_INVALID_ARGUMENT = 5,
     MR_ERROR_UNKNOWN = 6,
+    MR_ERROR_ALLOCATION = 7,
 } MRStatus;
 
 // Mirrors library.h's MathMode. Metal's default (FAST) permits reassociation,
@@ -94,6 +96,20 @@ typedef struct MRLaunchDesc {
 // Encodes and synchronously waits on one launch (dispatch.h's dispatch(),
 // not CommandBatch: one Launch per FFI call).
 MRStatus mr_dispatch(const MRLaunchDesc* launch, char** out_err_msg);
+
+// Encodes and submits one launch without blocking, so several launches can
+// overlap on the GPU queue (the fixed per-dispatch cost is queue latency
+// that amortizes across in-flight batches). On MR_OK, *out_batch owns the
+// in-flight work: mr_batch_wait blocks until it completes, mr_release_batch
+// frees the handle. Releasing without waiting is allowed; the submitted
+// work still runs, but faults go unreported.
+MRStatus mr_dispatch_async(const MRLaunchDesc* launch, MRBatch** out_batch, char** out_err_msg);
+
+// Blocks until the batch completes. Safe to call repeatedly and from
+// multiple threads. Reports a faulted command buffer as MR_ERROR_DISPATCH.
+MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg);
+
+void mr_release_batch(MRBatch* batch);
 
 #ifdef __cplusplus
 }  // extern "C"

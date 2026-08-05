@@ -493,7 +493,13 @@ NB_MODULE(_core, m) {
     nb::object compile_error = nb::exception<MSLCompileError>(m, "CompileError");
     [[maybe_unused]] nb::object not_found =
         nb::exception<MSLFunctionNotFoundError>(m, "FunctionNotFoundError", compile_error);
+    [[maybe_unused]] nb::object pipeline_build_error =
+        nb::exception<PipelineBuildError>(m, "PipelineBuildError", compile_error);
     [[maybe_unused]] nb::object dispatch_error = nb::exception<DispatchError>(m, "DispatchError");
+    [[maybe_unused]] nb::object allocation_error =
+        nb::exception<AllocationError>(m, "AllocationError", PyExc_MemoryError);
+    [[maybe_unused]] nb::object pipeline_cache_error =
+        nb::exception<PipelineCacheError>(m, "PipelineCacheError", PyExc_OSError);
 
     m.def(
         "device_name", []() { return runtime().device_name(); },
@@ -607,8 +613,33 @@ Write the pipeline cache to its configured path.
 
 Raises
 ------
-RuntimeError
+ValueError
     No pipeline cache directory is set.
+PipelineCacheError
+    Writing the file failed.
+)doc");
+    m.def(
+        "pipeline_cache_status",
+        []() {
+            auto stats = runtime().archive_add_stats();
+            nb::dict status;
+            status["dir"] = runtime().pipeline_cache_dir();
+            status["add_failures"] = stats.failures;
+            status["last_error"] = stats.failures ? nb::cast(stats.last_error) : nb::none();
+            return status;
+        },
+        R"doc(
+Staging health of the active pipeline cache.
+
+Failing to stage a pipeline into the cache is deliberately non-fatal (the
+pipeline itself built and runs); this is where those failures surface.
+Counters reset when set_pipeline_cache_dir() replaces the archive.
+
+Returns
+-------
+dict
+    ``dir`` (str or None), ``add_failures`` (int), and ``last_error``
+    (str or None, the most recent failure message).
 )doc");
 
     nb::class_<PyBuffer>(m, "Buffer")

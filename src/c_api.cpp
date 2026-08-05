@@ -60,6 +60,9 @@ MRStatus mr_guard(char** out_err_msg, Fn&& fn) {
     } catch (const NoDeviceError& e) {
         set_error(out_err_msg, e.what());
         return MR_ERROR_NO_DEVICE;
+    } catch (const AllocationError& e) {
+        set_error(out_err_msg, e.what());
+        return MR_ERROR_ALLOCATION;
     } catch (const std::invalid_argument& e) {
         set_error(out_err_msg, e.what());
         return MR_ERROR_INVALID_ARGUMENT;
@@ -186,38 +189,75 @@ MRStatus mr_buffer_flush_to(MRBuffer* buffer, char** out_err_msg) {
 
 void mr_release_buffer(MRBuffer* buffer) { delete buffer; }
 
+namespace {
+
+// Shared by mr_dispatch/mr_dispatch_async; `who` names the entry point in
+// error messages.
+Launch build_launch(const MRLaunchDesc* launch_desc, const char* who) {
+    if (!launch_desc) throw std::invalid_argument(std::string(who) + ": launch is null");
+    if (!launch_desc->pipeline)
+        throw std::invalid_argument(std::string(who) + ": launch has no pipeline");
+
+    Launch launch;
+    launch.pipeline = launch_desc->pipeline->pipeline.get();
+    for (size_t i = 0; i < launch_desc->buffer_count; ++i) {
+        if (!launch_desc->buffers[i]) {
+            throw std::invalid_argument(std::string(who) + ": buffers[" + std::to_string(i) +
+                                        "] is null");
+        }
+        launch.buffers.emplace_back(
+            &launch_desc->buffers[i]->buffer,
+            launch_desc->buffer_offsets[i] + launch_desc->buffers[i]->external_offset);
+    }
+    for (size_t i = 0; i < launch_desc->scalar_count; ++i) {
+        launch.scalars.emplace_back(launch_desc->scalars[i], launch_desc->scalar_sizes[i]);
+    }
+    launch.threadgroup_memory.assign(
+        launch_desc->threadgroup_memory,
+        launch_desc->threadgroup_memory + launch_desc->threadgroup_memory_count);
+    launch.grid = {launch_desc->grid_x, launch_desc->grid_y, launch_desc->grid_z};
+
+    if (launch_desc->threadgroup_x == 0) {
+        launch.threadgroup = launch.pipeline->default_threadgroup(launch.grid);
+    } else {
+        launch.threadgroup = {launch_desc->threadgroup_x, launch_desc->threadgroup_y,
+                              launch_desc->threadgroup_z};
+    }
+    return launch;
+}
+
+}  // namespace
+
 MRStatus mr_dispatch(const MRLaunchDesc* launch_desc, char** out_err_msg) {
     return mr_guard(out_err_msg, [&] {
-        if (!launch_desc) throw std::invalid_argument("mr_dispatch: launch is null");
-        if (!launch_desc->pipeline)
-            throw std::invalid_argument("mr_dispatch: launch has no pipeline");
-
-        Launch launch;
-        launch.pipeline = launch_desc->pipeline->pipeline.get();
-        for (size_t i = 0; i < launch_desc->buffer_count; ++i) {
-            if (!launch_desc->buffers[i]) {
-                throw std::invalid_argument("mr_dispatch: buffers[" + std::to_string(i) +
-                                            "] is null");
-            }
-            launch.buffers.emplace_back(
-                &launch_desc->buffers[i]->buffer,
-                launch_desc->buffer_offsets[i] + launch_desc->buffers[i]->external_offset);
-        }
-        for (size_t i = 0; i < launch_desc->scalar_count; ++i) {
-            launch.scalars.emplace_back(launch_desc->scalars[i], launch_desc->scalar_sizes[i]);
-        }
-        launch.threadgroup_memory.assign(
-            launch_desc->threadgroup_memory,
-            launch_desc->threadgroup_memory + launch_desc->threadgroup_memory_count);
-        launch.grid = {launch_desc->grid_x, launch_desc->grid_y, launch_desc->grid_z};
-
-        if (launch_desc->threadgroup_x == 0) {
-            launch.threadgroup = launch.pipeline->default_threadgroup(launch.grid);
-        } else {
-            launch.threadgroup = {launch_desc->threadgroup_x, launch_desc->threadgroup_y,
-                                  launch_desc->threadgroup_z};
-        }
-
+        Launch launch = build_launch(launch_desc, "mr_dispatch");
         dispatch(runtime().queue(), launch);
     });
 }
+
+struct MRBatch {
+    explicit MRBatch(MTL::CommandQueue* queue) : batch(queue) {}
+    CommandBatch batch;
+};
+
+MRStatus mr_dispatch_async(const MRLaunchDesc* launch_desc, MRBatch** out_batch,
+                           char** out_err_msg) {
+    if (out_batch) *out_batch = nullptr;
+    return mr_guard(out_err_msg, [&] {
+        if (!out_batch) throw std::invalid_argument("mr_dispatch_async: out_batch is null");
+        Launch launch = build_launch(launch_desc, "mr_dispatch_async");
+        auto handle = std::make_unique<MRBatch>(runtime().queue());
+        handle->batch.add(launch);
+        handle->batch.commit();
+        *out_batch = handle.release();
+    });
+}
+
+MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg) {
+    return mr_guard(out_err_msg, [&] {
+        if (!batch) throw std::invalid_argument("mr_batch_wait: batch is null");
+        batch->batch.wait();
+    });
+}
+
+void mr_release_batch(MRBatch* batch) { delete batch; }

@@ -26,6 +26,14 @@ struct DispatchError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// newComputePipelineState failed: the MSL front-end accepted the source, but
+// the back-end compile to a pipeline for this specific GPU did not (e.g. a
+// feature the target family lacks). A subclass of MSLCompileError so one
+// `except CompileError` in Python catches both halves of compilation.
+struct PipelineBuildError : MSLCompileError {
+    using MSLCompileError::MSLCompileError;
+};
+
 // A 1-, 2- or 3-dimensional extent.
 // Metal always works in 3D, unused dimensions are 1.
 struct Dim3 {

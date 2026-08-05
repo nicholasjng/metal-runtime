@@ -540,10 +540,52 @@ def test_pipeline_cache_dispatches_correctly_while_enabled(
     assert np.array_equal(buffer.to_numpy(), array + 1.0)
 
 
+def test_exception_hierarchy():
+    assert issubclass(mr.FunctionNotFoundError, mr.CompileError)
+    assert issubclass(mr.PipelineBuildError, mr.CompileError)
+    assert issubclass(mr.AllocationError, MemoryError)
+    assert issubclass(mr.PipelineCacheError, OSError)
+
+
+def test_impossible_allocation_raises_allocation_error():
+    # Far beyond any device's maxBufferLength; Metal refuses without
+    # actually trying to reserve the memory.
+    with pytest.raises(mr.AllocationError, match="failed to allocate"):
+        mr.Buffer.empty([2**42])
+    # AllocationError is a MemoryError, so generic OOM handlers catch it.
+    with pytest.raises(MemoryError):
+        mr.Buffer.empty([2**42])
+
+
 def test_save_pipeline_cache_without_a_dir_raises(restore_pipeline_cache_dir):
     mr.set_pipeline_cache_dir(None)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError, match="no pipeline cache directory"):
         mr.save_pipeline_cache()
+
+
+def test_save_pipeline_cache_to_an_unwritable_path_raises(
+    tmp_path, restore_pipeline_cache_dir
+):
+    # The parent directory does not exist, so serialization must fail.
+    mr.set_pipeline_cache_dir(str(tmp_path / "no_such_dir" / "pipelines.bin"))
+    with pytest.raises(mr.PipelineCacheError, match="failed to write pipeline cache"):
+        mr.save_pipeline_cache()
+    # PipelineCacheError is an I/O failure, so plain OSError handlers catch it.
+    with pytest.raises(OSError):
+        mr.save_pipeline_cache()
+
+
+def test_pipeline_cache_status_reports_dir_and_clean_staging(
+    tmp_path, restore_pipeline_cache_dir
+):
+    path = tmp_path / "pipelines.bin"
+    mr.set_pipeline_cache_dir(str(path))
+    status = mr.pipeline_cache_status()
+    assert status["dir"] == str(path)
+    assert status["add_failures"] == 0
+    assert status["last_error"] is None
+    mr.set_pipeline_cache_dir(None)
+    assert mr.pipeline_cache_status()["dir"] is None
 
 
 def test_save_pipeline_cache_writes_a_reusable_file(

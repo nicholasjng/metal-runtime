@@ -11,7 +11,10 @@ from numpy.typing import NDArray
 class DeviceError(Exception): ...
 class CompileError(Exception): ...
 class FunctionNotFoundError(CompileError): ...
+class PipelineBuildError(CompileError): ...
 class DispatchError(Exception): ...
+class AllocationError(MemoryError): ...
+class PipelineCacheError(OSError): ...
 
 def device_name() -> str:
     """
@@ -122,8 +125,25 @@ def save_pipeline_cache() -> None:
 
     Raises
     ------
-    RuntimeError
+    ValueError
         No pipeline cache directory is set.
+    PipelineCacheError
+        Writing the file failed.
+    """
+
+def pipeline_cache_status() -> dict:
+    """
+    Staging health of the active pipeline cache.
+
+    Failing to stage a pipeline into the cache is deliberately non-fatal (the
+    pipeline itself built and runs); this is where those failures surface.
+    Counters reset when set_pipeline_cache_dir() replaces the archive.
+
+    Returns
+    -------
+    dict
+        ``dir`` (str or None), ``add_failures`` (int), and ``last_error``
+        (str or None, the most recent failure message).
     """
 
 class Buffer:
