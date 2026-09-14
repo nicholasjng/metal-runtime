@@ -29,6 +29,12 @@ struct PipelineCacheError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// Starting a Metal GPU trace capture failed (unsupported destination or an
+// invalid/already-active capture request).
+struct CaptureError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 // Non-fatal pipeline-cache staging diagnostics; see pipeline_cache_status().
 struct ArchiveAddStats {
     size_t failures = 0;
@@ -94,7 +100,12 @@ class MetalRuntime {
     void note_archive_add_failure(const std::string& message);
     ArchiveAddStats archive_add_stats() const;
 
-    MTL::BinaryArchive* pipeline_archive() const;
+    std::shared_ptr<MTL::BinaryArchive> pipeline_archive() const;
+
+    // Capture all command queues on this runtime's device to a .gputrace.
+    void start_capture(const std::string& path);
+    void stop_capture();
+    bool is_capturing() const;
 
    private:
     void evict_locked();
@@ -110,9 +121,12 @@ class MetalRuntime {
         libraries_;
     size_t cache_limit_ = kDefaultLibraryCacheLimit;
 
-    MTL::BinaryArchive* pipeline_archive_ = nullptr;
+    std::shared_ptr<MTL::BinaryArchive> pipeline_archive_;
     std::string pipeline_cache_path_;
     ArchiveAddStats archive_add_stats_;
+
+    mutable std::mutex capture_mutex_;
+    bool capture_started_ = false;
 };
 
 MetalRuntime& runtime();

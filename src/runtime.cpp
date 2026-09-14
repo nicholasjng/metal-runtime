@@ -28,7 +28,7 @@ MetalRuntime::MetalRuntime() {
 }
 
 MetalRuntime::~MetalRuntime() {
-    if (pipeline_archive_) pipeline_archive_->release();
+    pipeline_archive_.reset();
     if (queue_) queue_->release();
     if (device_) device_->release();
 }
@@ -146,7 +146,7 @@ void MetalRuntime::clear_library_cache() {
 
 void MetalRuntime::set_pipeline_cache_dir(std::optional<std::string> path) {
     AutoreleaseScope scope;
-    MTL::BinaryArchive* archive = nullptr;
+    std::shared_ptr<MTL::BinaryArchive> archive;
     if (path) {
         MTL::BinaryArchiveDescriptor* descriptor =
             MTL::BinaryArchiveDescriptor::alloc()->init()->autorelease();
@@ -155,20 +155,25 @@ void MetalRuntime::set_pipeline_cache_dir(std::optional<std::string> path) {
             descriptor->setUrl(NS::URL::fileURLWithPath(p));
         }
         NS::Error* error = nullptr;
-        archive = device_->newBinaryArchive(descriptor, &error);
-        if (!archive) {
+        MTL::BinaryArchive* created = device_->newBinaryArchive(descriptor, &error);
+        if (!created) {
             std::string message =
                 error ? error->localizedDescription()->utf8String() : "unknown error";
             throw PipelineCacheError("failed to open pipeline cache at " + *path + ": " + message);
         }
-        archive->retain();
+        archive = std::shared_ptr<MTL::BinaryArchive>(created, [](MTL::BinaryArchive* value) {
+            if (value) value->release();
+        });
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (pipeline_archive_) pipeline_archive_->release();
-    pipeline_archive_ = archive;
-    pipeline_cache_path_ = path.value_or("");
-    archive_add_stats_ = {};
+    std::shared_ptr<MTL::BinaryArchive> replaced;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        replaced = std::move(pipeline_archive_);
+        pipeline_archive_ = std::move(archive);
+        pipeline_cache_path_ = path.value_or("");
+        archive_add_stats_ = {};
+    }
 }
 
 void MetalRuntime::note_archive_add_failure(const std::string& message) {
@@ -190,7 +195,7 @@ std::optional<std::string> MetalRuntime::pipeline_cache_dir() const {
 
 void MetalRuntime::save_pipeline_cache() {
     AutoreleaseScope scope;
-    MTL::BinaryArchive* archive;
+    std::shared_ptr<MTL::BinaryArchive> archive;
     std::string path;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -209,9 +214,56 @@ void MetalRuntime::save_pipeline_cache() {
     }
 }
 
-MTL::BinaryArchive* MetalRuntime::pipeline_archive() const {
+std::shared_ptr<MTL::BinaryArchive> MetalRuntime::pipeline_archive() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return pipeline_archive_;
+}
+
+void MetalRuntime::start_capture(const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("start_capture: output path must not be empty");
+
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+    AutoreleaseScope scope;
+    MTL::CaptureManager* manager = MTL::CaptureManager::sharedCaptureManager();
+    if (manager->isCapturing()) {
+        throw CaptureError("a Metal capture is already in progress");
+    }
+    if (!manager->supportsDestination(MTL::CaptureDestinationGPUTraceDocument)) {
+        throw CaptureError("this system does not support GPU trace document captures");
+    }
+
+    MTL::CaptureDescriptor* descriptor = MTL::CaptureDescriptor::alloc()->init()->autorelease();
+    // A device capture includes every queue on this physical device. This is
+    // useful when another native binding in the same process owns its queue.
+    descriptor->setCaptureObject(device_);
+    descriptor->setDestination(MTL::CaptureDestinationGPUTraceDocument);
+    NS::String* output_path = NS::String::string(path.c_str(), NS::UTF8StringEncoding);
+    descriptor->setOutputURL(NS::URL::fileURLWithPath(output_path));
+
+    NS::Error* error = nullptr;
+    if (!manager->startCapture(descriptor, &error)) {
+        std::string message =
+            error ? error->localizedDescription()->utf8String() : "unknown Metal capture error";
+        throw CaptureError("failed to start Metal capture at " + path + ": " + message);
+    }
+    capture_started_ = true;
+}
+
+void MetalRuntime::stop_capture() {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+    if (!capture_started_) throw CaptureError("no capture started by metal_runtime is active");
+    MTL::CaptureManager* manager = MTL::CaptureManager::sharedCaptureManager();
+    if (!manager->isCapturing()) {
+        capture_started_ = false;
+        throw CaptureError("the Metal capture was stopped outside metal_runtime");
+    }
+    manager->stopCapture();
+    capture_started_ = false;
+}
+
+bool MetalRuntime::is_capturing() const {
+    std::lock_guard<std::mutex> lock(capture_mutex_);
+    return MTL::CaptureManager::sharedCaptureManager()->isCapturing();
 }
 
 MetalRuntime& runtime() {

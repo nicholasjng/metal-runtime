@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -414,6 +415,7 @@ class PyBatch {
              const std::vector<size_t>& threadgroup_memory, size_t indirect_offset) {
         PreparedLaunch prepared = prepare(kernel, grid, threadgroup, buffers, std::move(scalars),
                                           threadgroup_memory, indirect_offset);
+        std::lock_guard<std::mutex> lock(keepalive_mutex_);
         batch_->add(prepared.launch);
         // The batch is committed later, so its buffers have to stay alive
         // until then, not just until this call returns. Deduplicated: a
@@ -435,8 +437,15 @@ class PyBatch {
             nb::gil_scoped_release release;
             batch_->wait();
         }
-        keepalive_.clear();
-        pinned_.clear();
+        // Decref outside the lock: Python finalizers may re-enter this batch.
+        // Never hold this mutex while releasing/reacquiring the GIL or waiting
+        // for GPU completion.
+        std::vector<nb::object> released;
+        {
+            std::lock_guard<std::mutex> lock(keepalive_mutex_);
+            released.swap(keepalive_);
+            pinned_.clear();
+        }
     }
 
     std::optional<double> gpu_time() const { return batch_->gpu_time(); }
@@ -454,8 +463,35 @@ class PyBatch {
 
    private:
     std::unique_ptr<CommandBatch> batch_;
+    std::mutex keepalive_mutex_;
     std::vector<nb::object> keepalive_;
     std::unordered_set<PyObject*> pinned_;
+};
+
+// Python context manager for a trace around an arbitrary block of dispatches.
+class PyCapture {
+   public:
+    explicit PyCapture(std::string path) : path_(std::move(path)) {}
+
+    PyCapture& enter() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_) throw CaptureError("this Capture context is already active");
+        runtime().start_capture(path_);
+        active_ = true;
+        return *this;
+    }
+
+    void exit() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!active_) throw CaptureError("this Capture context is not active");
+        runtime().stop_capture();
+        active_ = false;
+    }
+
+   private:
+    std::string path_;
+    std::mutex mutex_;
+    bool active_ = false;
 };
 
 #define METAL_RUNTIME_LAUNCH_PARAMS                           \
@@ -500,6 +536,29 @@ NB_MODULE(_core, m) {
         nb::exception<AllocationError>(m, "AllocationError", PyExc_MemoryError);
     [[maybe_unused]] nb::object pipeline_cache_error =
         nb::exception<PipelineCacheError>(m, "PipelineCacheError", PyExc_OSError);
+    [[maybe_unused]] nb::object capture_error = nb::exception<CaptureError>(m, "CaptureError");
+
+    m.def(
+        "start_capture", [](const std::string& path) { runtime().start_capture(path); }, "path"_a,
+        R"doc(
+Start capturing command buffers submitted to this runtime's Metal device.
+
+Parameters
+----------
+path : str
+    Destination path for the .gputrace document.
+
+Raises
+------
+CaptureError
+    Capture is already active, unsupported, or could not be started.
+)doc");
+    m.def(
+        "stop_capture", []() { runtime().stop_capture(); },
+        "Stop the active Metal trace capture and write its GPU trace document.");
+    m.def(
+        "is_capturing", []() { return runtime().is_capturing(); },
+        "Whether a Metal trace capture is currently active in this process.");
 
     m.def(
         "device_name", []() { return runtime().device_name(); },
@@ -736,14 +795,52 @@ mlx.core.array
 )doc")
         .def(
             "__dlpack__",
-            [](PyBuffer& b, nb::kwargs) {
+            [](PyBuffer& b, nb::kwargs kwargs) {
+                for (auto [key, value] : kwargs) {
+                    const std::string name = nb::cast<std::string>(key);
+                    if (name == "copy") {
+                        if (!value.is_none() && !nb::isinstance<nb::bool_>(value)) {
+                            throw nb::type_error(
+                                "Buffer.__dlpack__(copy=...) expects bool or None");
+                        }
+                        if (!value.is_none() && nb::cast<bool>(value)) {
+                            throw nb::type_error(
+                                "Buffer.__dlpack__(copy=True) is unsupported; use "
+                                "Buffer.to_numpy() "
+                                "and copy the returned array");
+                        }
+                    } else if (name == "stream") {
+                        if (!value.is_none()) {
+                            throw nb::type_error(
+                                "Buffer.__dlpack__ only supports stream=None for CPU-accessible "
+                                "Metal shared memory");
+                        }
+                    } else if (name == "dl_device") {
+                        auto device = nb::cast<std::pair<int, int>>(value);
+                        if (device != std::pair<int, int>{1, 0}) {
+                            throw nb::type_error(
+                                "Buffer.__dlpack__ only supports dl_device=(1, 0) (CPU)");
+                        }
+                    } else if (name == "max_version") {
+                        if (!value.is_none()) {
+                            throw nb::type_error(
+                                "Buffer.__dlpack__ does not support versioned DLPack capsules");
+                        }
+                    } else {
+                        const std::string message =
+                            "Buffer.__dlpack__ got unsupported keyword '" + name + "'";
+                        throw nb::type_error(message.c_str());
+                    }
+                }
                 // nb::ndarray<> (no framework) casts directly to a raw DLPack capsule.
                 // Unlike routing through to_numpy(), this never consults NumPy's dtype
                 // table, so bfloat16 (and anything else DType supports) exports fine.
                 return b.to_dlpack_ndarray();
             },
             nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"),
-            "DLPack capsule for this buffer's memory. Zero-copy.")
+            "DLPack capsule for this buffer's memory. Zero-copy. Supports copy=None/False, "
+            "stream=None, dl_device=(1, 0), and max_version=None. Unsupported protocol "
+            "options are rejected instead of ignored.")
         .def(
             "__dlpack_device__",
             // (kDLCPU, 0): unified memory, so the bytes are host-addressable.
@@ -943,4 +1040,22 @@ dict or None
                     "BaseException | None, traceback: types.TracebackType | None) -> None"),
             "Waits on the batch if the body didn't raise; otherwise discards it "
             "without committing.");
+
+    nb::class_<PyCapture>(m, "Capture")
+        .def(nb::init<std::string>(), "path"_a,
+             R"doc(
+Capture command queues on this runtime's Metal device to a GPU trace document.
+
+Use as a context manager to stop the capture even if the body raises:
+``with metal_runtime.Capture("profile.gputrace"): ...``.
+)doc")
+        .def("__enter__", &PyCapture::enter, nb::rv_policy::reference_internal,
+             nb::sig("def __enter__(self) -> typing.Self"), "Start the capture and return self.")
+        .def(
+            "__exit__",
+            [](PyCapture& capture, nb::handle, nb::handle, nb::handle) { capture.exit(); },
+            nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
+            nb::sig("def __exit__(self, exc_type: type[BaseException] | None, exc_value: "
+                    "BaseException | None, traceback: types.TracebackType | None) -> None"),
+            "Stop the capture.");
 }

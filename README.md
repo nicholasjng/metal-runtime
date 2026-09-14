@@ -72,6 +72,19 @@ with mr.Batch() as batch:
 while *n* executes. `mr.Batch(concurrent=True)` lets independent launches
 overlap on the GPU.
 
+**GPU capture.** Capture dispatches on the runtime's Metal device to an Xcode
+GPU trace document. The context manager stops capture even if the profiled
+block raises:
+
+```python
+with mr.Capture("attention.gputrace"):
+    run_flash_attention()
+```
+
+For manual control, use `mr.start_capture(path)`, `mr.stop_capture()`, and
+`mr.is_capturing()`. `CaptureError` reports unsupported or failed capture
+requests.
+
 **Compile options.** `Kernel` takes `math_mode` and preprocessor `defines`.
 `math_mode` defaults to `FAST` (Metal's default), which permits
 reassociation and can silently optimize away compensated arithmetic like a

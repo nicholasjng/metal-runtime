@@ -15,6 +15,28 @@ class PipelineBuildError(CompileError): ...
 class DispatchError(Exception): ...
 class AllocationError(MemoryError): ...
 class PipelineCacheError(OSError): ...
+class CaptureError(Exception): ...
+
+def start_capture(path: str) -> None:
+    """
+    Start capturing command buffers submitted to this runtime's Metal device.
+
+    Parameters
+    ----------
+    path : str
+        Destination path for the .gputrace document.
+
+    Raises
+    ------
+    CaptureError
+        Capture is already active, unsupported, or could not be started.
+    """
+
+def stop_capture() -> None:
+    """Stop the active Metal trace capture and write its GPU trace document."""
+
+def is_capturing() -> bool:
+    """Whether a Metal trace capture is currently active in this process."""
 
 def device_name() -> str:
     """
@@ -255,7 +277,9 @@ class Buffer:
         """
 
     def __dlpack__(self, **kwargs) -> Any:
-        """DLPack capsule for this buffer's memory. Zero-copy."""
+        """
+        DLPack capsule for this buffer's memory. Zero-copy. Supports copy=None/False, stream=None, dl_device=(1, 0), and max_version=None. Unsupported protocol options are rejected instead of ignored.
+        """
 
     def __dlpack_device__(self) -> tuple:
         """
@@ -479,3 +503,23 @@ class Batch:
         """
         Waits on the batch if the body didn't raise; otherwise discards it without committing.
         """
+
+class Capture:
+    def __init__(self, path: str) -> None:
+        """
+        Capture command queues on this runtime's Metal device to a GPU trace document.
+
+        Use as a context manager to stop the capture even if the body raises:
+        ``with metal_runtime.Capture("profile.gputrace"): ...``.
+        """
+
+    def __enter__(self) -> Self:
+        """Start the capture and return self."""
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> None:
+        """Stop the capture."""
