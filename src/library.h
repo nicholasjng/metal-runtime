@@ -1,12 +1,15 @@
 #pragma once
 #include <array>
+#include <condition_variable>
 #include <cstdint>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "dtype.h"
@@ -87,7 +90,7 @@ class Library {
     // `archive` passes straight through to ComputePipeline on a cache miss.
     std::shared_ptr<ComputePipeline> pipeline_for(const std::string& name,
                                                   const FunctionConstants& constants = {},
-                                                  MTL::BinaryArchive* archive = nullptr);
+                                                  std::shared_ptr<MTL::BinaryArchive> archive = {});
 
    private:
     bool has_function(const std::string& name) const;
@@ -100,6 +103,17 @@ class Library {
     MTL::Device* device_ = nullptr;  // borrowed from the runtime singleton
     MTL::Library* library_ = nullptr;
 
+    static constexpr size_t kMaxCachedPipelines = 128;
     std::mutex mutex_;
-    std::unordered_map<std::string, std::shared_ptr<ComputePipeline>> pipelines_;
+    using PipelineLRU = std::list<std::string>;
+    PipelineLRU pipeline_lru_;
+    std::unordered_map<std::string,
+                       std::pair<std::shared_ptr<ComputePipeline>, PipelineLRU::iterator>>
+        pipelines_;
+    std::unordered_set<std::string> pipelines_building_;
+    std::condition_variable pipeline_build_cv_;
+
+    void cache_pipeline_locked(const std::string& key,
+                               const std::shared_ptr<ComputePipeline>& pipeline);
+    std::shared_ptr<ComputePipeline> find_pipeline_locked(const std::string& key);
 };

@@ -1342,3 +1342,114 @@ def test_to_numpy_is_a_live_view_of_shared_memory():
 def test_view_keeps_its_buffer_alive():
     view = mr.Buffer(np.arange(4, dtype=np.float32)).to_numpy()
     assert np.array_equal(view, np.arange(4, dtype=np.float32))
+
+
+@pytest.mark.parametrize("offset", [2**64 - 4, 2**64 - 12, 12, 16])
+def test_indirect_offset_cannot_wrap_or_extend_past_buffer(offset):
+    kernel = mr.Kernel(_FILL_TID_SOURCE, "fill_tid")
+    counts = mr.Buffer(np.array([1, 1, 1], dtype=np.uint32))
+    batch = mr.Batch()
+    with pytest.raises(ValueError, match="indirect grid arguments"):
+        batch.add(
+            kernel,
+            grid=counts,
+            threadgroup=1,
+            buffers=[mr.Buffer.zeros([1])],
+            indirect_offset=offset,
+        )
+    # Failed validation leaves the encoder usable.
+    out = mr.Buffer.zeros([1])
+    batch.add(kernel, grid=counts, threadgroup=1, buffers=[out])
+    batch.wait()
+    np.testing.assert_array_equal(out.to_numpy(), [0])
+
+
+@pytest.mark.parametrize("lengths", [[2**64 - 1], [2**64 - 16, 16], [2**63, 2**63]])
+def test_threadgroup_memory_cannot_overflow(lengths):
+    kernel = mr.Kernel(_FILL_TID_SOURCE, "fill_tid")
+    batch = mr.Batch()
+    with pytest.raises(ValueError, match="threadgroup memory"):
+        batch.add(
+            kernel, grid=1, buffers=[mr.Buffer.zeros([1])], threadgroup_memory=lengths
+        )
+
+
+def test_threadgroup_memory_checks_aggregate_rounded_budget():
+    kernel = mr.Kernel(_FILL_TID_SOURCE, "fill_tid")
+    limit = mr.device_info()["max_threadgroup_memory_length"]
+    with pytest.raises(ValueError, match="threadgroup memory"):
+        mr.Batch().add(
+            kernel,
+            grid=1,
+            buffers=[mr.Buffer.zeros([1])],
+            threadgroup_memory=[limit - 16, 17],
+        )
+
+
+def test_shared_batch_encodes_and_waits_from_multiple_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+    out = mr.Buffer.zeros([32])
+    batch = mr.Batch()
+    start = threading.Barrier(8)
+
+    def encode(_):
+        start.wait(timeout=10)
+        for _ in range(20):
+            batch.add(kernel, grid=32, buffers=[out])
+            batch.barrier()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(encode, range(8)))
+
+    start = threading.Barrier(8)
+
+    def wait_and_read(_):
+        start.wait(timeout=10)
+        for _ in range(20):
+            # Reads may race the first timestamp capture.
+            before = batch.timestamps
+            assert before is None or before["gpu_end"] >= before["gpu_start"]
+            batch.wait()
+            assert batch.gpu_time is not None
+            assert batch.timestamps is not None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(wait_and_read, range(8)))
+    np.testing.assert_array_equal(out.to_numpy(), np.full(32, 160, dtype=np.float32))
+
+
+def test_shared_batch_commit_races_encoding():
+    from concurrent.futures import ThreadPoolExecutor
+
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+    for _ in range(20):
+        out = mr.Buffer.zeros([1])
+        batch = mr.Batch()
+        start = threading.Barrier(4)
+
+        def encode(_, start=start, batch=batch, out=out):
+            start.wait(timeout=10)
+            added = 0
+            for _ in range(20):
+                try:
+                    batch.add(kernel, grid=1, buffers=[out])
+                    added += 1
+                    batch.barrier()
+                except mr.DispatchError:
+                    break
+            return added
+
+        def commit(start=start, batch=batch):
+            start.wait(timeout=10)
+            batch.commit()
+            batch.wait()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            encoders = [pool.submit(encode, i) for i in range(3)]
+            submitter = pool.submit(commit)
+            added = sum(f.result(timeout=20) for f in encoders)
+            submitter.result(timeout=20)
+        batch.wait()
+        np.testing.assert_array_equal(out.to_numpy(), [added])

@@ -1,6 +1,7 @@
 #include "dispatch.h"
 
 #include <algorithm>
+#include <limits>
 #include <string>
 
 #include "metal.h"
@@ -26,6 +27,9 @@ std::string to_string(Dim3 d) {
 // Round up rather than reject: the caller asked for room for N elements, and
 // Metal only allocates in 16-byte units.
 size_t rounded_threadgroup_length(size_t length) {
+    if (length > std::numeric_limits<size_t>::max() - (kThreadgroupMemoryAlignment - 1)) {
+        throw std::invalid_argument("dispatch: threadgroup memory allocation overflows");
+    }
     return (length + kThreadgroupMemoryAlignment - 1) / kThreadgroupMemoryAlignment *
            kThreadgroupMemoryAlignment;
 }
@@ -161,7 +165,14 @@ void ComputePipeline::validate_shape(size_t binding_count,
     // is a process abort (Metal API validation), not an error.
     size_t threadgroup_total = static_threadgroup_memory_length();
     for (size_t length : threadgroup_memory) {
-        threadgroup_total += rounded_threadgroup_length(length);
+        size_t rounded = rounded_threadgroup_length(length);
+        if (threadgroup_total > device_max_threadgroup_memory ||
+            rounded > device_max_threadgroup_memory - threadgroup_total) {
+            throw std::invalid_argument(
+                "dispatch: threadgroup memory exceeds this device's budget of " +
+                std::to_string(device_max_threadgroup_memory) + " bytes per threadgroup");
+        }
+        threadgroup_total += rounded;
     }
     if (threadgroup_total > device_max_threadgroup_memory) {
         throw std::invalid_argument(
@@ -234,6 +245,7 @@ CommandBatch::~CommandBatch() {
 }
 
 void CommandBatch::add(const Launch& launch) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (committed_) {
         throw DispatchError("cannot add to a batch that has already been committed");
     }
@@ -271,8 +283,9 @@ void CommandBatch::add(const Launch& launch) {
     }
 
     if (launch.indirect_grid) {
-        size_t needed = launch.indirect_offset + kIndirectArgumentsSize;
-        if (launch.indirect_offset % 4 != 0 || needed > launch.indirect_grid->size()) {
+        size_t size = launch.indirect_grid->size();
+        if (launch.indirect_offset % 4 != 0 || launch.indirect_offset > size ||
+            kIndirectArgumentsSize > size - launch.indirect_offset) {
             throw std::invalid_argument(
                 "dispatch: indirect grid arguments need " + std::to_string(kIndirectArgumentsSize) +
                 " bytes at a 4-byte-aligned offset, but offset " +
@@ -312,6 +325,7 @@ void CommandBatch::add(const Launch& launch) {
 }
 
 void CommandBatch::barrier() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (committed_) {
         throw DispatchError("cannot add a barrier to a batch that has already been committed");
     }

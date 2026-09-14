@@ -268,7 +268,10 @@ Library::~Library() {
 }
 
 Library::Library(Library&& other) noexcept
-    : device_(other.device_), library_(other.library_), pipelines_(std::move(other.pipelines_)) {
+    : device_(other.device_),
+      library_(other.library_),
+      pipeline_lru_(std::move(other.pipeline_lru_)),
+      pipelines_(std::move(other.pipelines_)) {
     other.library_ = nullptr;
 }
 
@@ -368,14 +371,13 @@ MTL::Function* Library::create_specialized(const std::string& name,
     return fn;
 }
 
-std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
-                                                       const FunctionConstants& constants,
-                                                       MTL::BinaryArchive* archive) {
+std::shared_ptr<ComputePipeline> Library::pipeline_for(
+    const std::string& name, const FunctionConstants& constants,
+    std::shared_ptr<MTL::BinaryArchive> archive) {
     const std::string key = pipeline_key(name, constants);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = pipelines_.find(key);
-        if (it != pipelines_.end()) return it->second;
+        if (auto cached = find_pipeline_locked(key)) return cached;
     }
 
     FunctionConstants canonical;
@@ -385,20 +387,61 @@ std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
     // ({N: 8} vs {N: np.uint32(8)}). Alias rather than build a duplicate.
     const std::string canonical_key = pipeline_key(name, canonical);
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = pipelines_.find(canonical_key);
-        if (it != pipelines_.end()) {
-            fn->release();
-            pipelines_.emplace(key, it->second);
-            return it->second;
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (true) {
+            if (auto cached = find_pipeline_locked(canonical_key)) {
+                if (key != canonical_key) cache_pipeline_locked(key, cached);
+                fn->release();
+                return cached;
+            }
+            if (pipelines_building_.insert(canonical_key).second) break;
+            pipeline_build_cv_.wait(lock);
         }
     }
 
-    // Built outside the lock, same tradeoff as the library cache.
-    auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name, archive);
+    // Different specializations can still build in parallel. A waiter for
+    // this key sleeps until its one pipeline build has been published.
+    try {
+        auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name, archive.get());
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_pipeline_locked(canonical_key, pipeline);
+        if (key != canonical_key) cache_pipeline_locked(key, pipeline);
+        pipelines_building_.erase(canonical_key);
+        pipeline_build_cv_.notify_all();
+        return pipeline;
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pipelines_building_.erase(canonical_key);
+        pipeline_build_cv_.notify_all();
+        throw;
+    }
+}
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto [it, inserted] = pipelines_.emplace(canonical_key, std::move(pipeline));
-    if (key != canonical_key) pipelines_.emplace(key, it->second);
-    return it->second;
+std::shared_ptr<ComputePipeline> Library::find_pipeline_locked(const std::string& key) {
+    auto it = pipelines_.find(key);
+    if (it == pipelines_.end()) return nullptr;
+    pipeline_lru_.splice(pipeline_lru_.begin(), pipeline_lru_, it->second.second);
+    return it->second.first;
+}
+
+void Library::cache_pipeline_locked(const std::string& key,
+                                    const std::shared_ptr<ComputePipeline>& pipeline) {
+    auto found = pipelines_.find(key);
+    if (found != pipelines_.end()) {
+        found->second.first = pipeline;
+        pipeline_lru_.splice(pipeline_lru_.begin(), pipeline_lru_, found->second.second);
+        return;
+    }
+
+    pipeline_lru_.push_front(key);
+    try {
+        pipelines_.emplace(key, std::make_pair(pipeline, pipeline_lru_.begin()));
+    } catch (...) {
+        pipeline_lru_.pop_front();
+        throw;
+    }
+    while (pipelines_.size() > kMaxCachedPipelines) {
+        pipelines_.erase(pipeline_lru_.back());
+        pipeline_lru_.pop_back();
+    }
 }

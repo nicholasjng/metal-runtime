@@ -141,6 +141,8 @@ struct Launch {
 // Several launches in one command buffer, one commit for the sequence.
 // The default serial encoder orders launches, a concurrent encoder lets them overlap,
 // with ordering only across an explicit barrier().
+// Operations on one batch are synchronized. An add/barrier racing commit
+// either encodes before submission or throws DispatchError afterwards.
 class CommandBatch {
    public:
     explicit CommandBatch(MTL::CommandQueue* queue, bool concurrent = false);
@@ -167,7 +169,10 @@ class CommandBatch {
     void wait();
 
     // Device-side execution seconds for the whole batch; set by wait().
-    std::optional<double> gpu_time() const { return gpu_time_; }
+    std::optional<double> gpu_time() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return gpu_time_;
+    }
 
     // The four command buffer timestamps, in one common epoch (seconds), so
     // their differences separate driver submission from GPU execution from
@@ -178,15 +183,18 @@ class CommandBatch {
         double gpu_start = 0;     // GPU began executing
         double gpu_end = 0;       // GPU finished
     };
-    std::optional<Timestamps> timestamps() const { return timestamps_; }
+    std::optional<Timestamps> timestamps() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return timestamps_;
+    }
 
    private:
     void commit_locked();
 
     MTL::CommandBuffer* command_buffer_ = nullptr;
     MTL::ComputeCommandEncoder* encoder_ = nullptr;
-    // Guards committed_, waited_, and the one-time timestamp capture.
-    std::mutex state_mutex_;
+    // Guards encoding, submission, completion state, and timestamp snapshots.
+    mutable std::mutex state_mutex_;
     bool committed_ = false;
     bool waited_ = false;
     // Device capabilities, read once in the constructor.
