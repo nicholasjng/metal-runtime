@@ -412,3 +412,87 @@ def test_async_dispatch_overlaps_and_offsets_partition_one_buffer(lib):
     lib.mr_release_buffer(buffer)
     lib.mr_release_pipeline(pipeline)
     lib.mr_release_library(library)
+
+
+@pytest.mark.parametrize("async_dispatch", [False, True])
+@pytest.mark.parametrize("offset", [4, 64, 2**64 - 64])
+def test_dispatch_rejects_offsets_outside_logical_wrapping(lib, async_dispatch, offset):
+    status, library, err = _compile(lib, _ADD_ONE_SOURCE)
+    assert status == MR_OK, err.value
+    status, pipeline, err = _get_pipeline(lib, library, b"add_one")
+    assert status == MR_OK, err.value
+    buffer = ctypes.c_void_p()
+    batch = ctypes.c_void_p()
+    with mmap.mmap(-1, mmap.PAGESIZE) as region:
+        data = np.frombuffer(region, dtype=np.float32)
+        data[:] = 10
+        try:
+            # The logical allocation starts inside the page. The huge offset
+            # used to wrap back to the page's beginning when 64 was added.
+            status = lib.mr_wrap_buffer(
+                data.ctypes.data + 64, 4, ctypes.byref(buffer), ctypes.byref(err)
+            )
+            assert status == MR_OK, err.value
+            desc = MRLaunchDesc()
+            desc.pipeline = pipeline
+            desc.buffers = (ctypes.c_void_p * 1)(buffer)
+            desc.buffer_offsets = (ctypes.c_size_t * 1)(offset)
+            desc.buffer_count = 1
+            desc.grid_x = desc.grid_y = desc.grid_z = 1
+            desc.threadgroup_x = desc.threadgroup_y = desc.threadgroup_z = 1
+            if async_dispatch:
+                status = lib.mr_dispatch_async(
+                    ctypes.byref(desc), ctypes.byref(batch), ctypes.byref(err)
+                )
+            else:
+                status = lib.mr_dispatch(ctypes.byref(desc), ctypes.byref(err))
+            assert status == 5, err.value
+            assert b"logical buffer of 4 bytes" in err.value
+            assert not batch.value
+            np.testing.assert_array_equal(
+                data, np.full(data.shape, 10, dtype=np.float32)
+            )
+            lib.mr_free_error_message(err)
+            err = ctypes.c_char_p()
+            # Offset zero remains valid after the rejected launch.
+            status, err = _dispatch_add_one(lib, pipeline, buffer, 1)
+            assert status == MR_OK, err.value
+            assert data[16] == 11
+        finally:
+            if batch.value:
+                lib.mr_batch_wait(batch, ctypes.byref(err))
+                lib.mr_release_batch(batch)
+            lib.mr_release_buffer(buffer)
+            lib.mr_release_pipeline(pipeline)
+            lib.mr_release_library(library)
+            del data
+
+
+@pytest.mark.parametrize(
+    "ptr, size", [(1, 2**64 - 1), (2**64 - 16, 32), (2**64 - mmap.PAGESIZE, 1)]
+)
+def test_wrap_rejects_unrepresentable_memory_ranges(lib, ptr, size):
+    buffer = ctypes.c_void_p()
+    err = ctypes.c_char_p()
+    status = lib.mr_wrap_buffer(ptr, size, ctypes.byref(buffer), ctypes.byref(err))
+    assert status == 5, err.value
+    assert not buffer.value
+    assert err.value and b"overflows" in err.value
+    lib.mr_free_error_message(err)
+
+
+def test_zero_length_wrap_still_accepts_zero_offset(lib):
+    source = b"kernel void noop() {}"
+    status, library, err = _compile(lib, source)
+    assert status == MR_OK, err.value
+    status, pipeline, err = _get_pipeline(lib, library, b"noop")
+    assert status == MR_OK, err.value
+    buffer = ctypes.c_void_p()
+    assert lib.mr_wrap_buffer(None, 0, ctypes.byref(buffer), ctypes.byref(err)) == MR_OK
+    try:
+        status, err = _dispatch_add_one(lib, pipeline, buffer, 1)
+        assert status == MR_OK, err.value
+    finally:
+        lib.mr_release_buffer(buffer)
+        lib.mr_release_pipeline(pipeline)
+        lib.mr_release_library(library)

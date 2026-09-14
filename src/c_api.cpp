@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -31,6 +32,7 @@ struct MRBuffer {
     void* external_ptr = nullptr;  // set even on the copy path, for flush_to
     size_t external_offset = 0;    // buffer.contents() + external_offset == external_ptr
     bool owns_copy = false;        // true: buffer is a private copy, flush_to must run
+    size_t logical_size = 0;       // excludes the enclosing page padding
 };
 
 namespace {
@@ -38,6 +40,7 @@ namespace {
 void set_error(char** out_err_msg, const std::string& message) {
     if (!out_err_msg) return;
     *out_err_msg = (char*)std::malloc(message.size() + 1);
+    if (!*out_err_msg) return;
     std::memcpy(*out_err_msg, message.c_str(), message.size() + 1);
 }
 
@@ -94,7 +97,8 @@ bool region_is_mapped_rw(void* start, size_t length) {
     // If it moved, `start` was never mapped in the first place.
     if (addr > queried) return false;
     if (!(info.protection & VM_PROT_READ) || !(info.protection & VM_PROT_WRITE)) return false;
-    return queried + (mach_vm_size_t)length <= addr + region_size;
+    mach_vm_size_t offset = queried - addr;
+    return offset <= region_size && length <= region_size - offset;
 }
 
 }  // namespace
@@ -105,6 +109,8 @@ MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len, MRMat
                             MRLibrary** out_library, char** out_err_msg) {
     if (out_library) *out_library = nullptr;
     return mr_guard(out_err_msg, [&] {
+        if (!out_library) throw std::invalid_argument("mr_compile_library: out_library is null");
+        if (!msl_source) throw std::invalid_argument("mr_compile_library: msl_source is null");
         CompileOptions options;
         switch (math_mode) {
             case MR_MATH_MODE_SAFE:
@@ -131,7 +137,9 @@ MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name, MRPipeli
                          char** out_err_msg) {
     if (out_pipeline) *out_pipeline = nullptr;
     return mr_guard(out_err_msg, [&] {
+        if (!out_pipeline) throw std::invalid_argument("mr_get_pipeline: out_pipeline is null");
         if (!library) throw std::invalid_argument("mr_get_pipeline: library is null");
+        if (!function_name) throw std::invalid_argument("mr_get_pipeline: function_name is null");
         auto* pipeline = new MRPipeline{library->library.pipeline_for(function_name)};
         *out_pipeline = pipeline;
     });
@@ -142,6 +150,7 @@ void mr_release_pipeline(MRPipeline* pipeline) { delete pipeline; }
 MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, char** out_err_msg) {
     if (out_buffer) *out_buffer = nullptr;
     return mr_guard(out_err_msg, [&] {
+        if (!out_buffer) throw std::invalid_argument("mr_wrap_buffer: out_buffer is null");
         if (!ptr && size_bytes > 0) {
             throw std::invalid_argument("mr_wrap_buffer: ptr is null for a nonzero size");
         }
@@ -158,12 +167,21 @@ MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, cha
             uintptr_t addr = (uintptr_t)ptr;
             uintptr_t page_start = addr & ~(uintptr_t)(page_size - 1);
             size_t offset = addr - page_start;
+            constexpr size_t max_size = std::numeric_limits<size_t>::max();
+            if (size_bytes > std::numeric_limits<uintptr_t>::max() - addr ||
+                size_bytes > max_size - offset ||
+                offset + size_bytes > max_size - (page_size - 1)) {
+                throw std::invalid_argument("mr_wrap_buffer: memory range overflows");
+            }
             size_t wrapped_length = ((offset + size_bytes + page_size - 1) / page_size) * page_size;
+            if (wrapped_length > std::numeric_limits<uintptr_t>::max() - page_start) {
+                throw std::invalid_argument("mr_wrap_buffer: page-rounded memory range overflows");
+            }
 
             if (region_is_mapped_rw((void*)page_start, wrapped_length)) {
                 auto* buf =
                     new MRBuffer{Buffer(runtime().device(), (void*)page_start, wrapped_length), ptr,
-                                 offset, false};
+                                 offset, false, size_bytes};
                 *out_buffer = buf;
                 return;
             }
@@ -171,7 +189,7 @@ MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, cha
 
         Buffer owned(runtime().device(), size_bytes);
         if (size_bytes > 0) std::memcpy(owned.contents(), ptr, size_bytes);
-        auto* buf = new MRBuffer{std::move(owned), ptr, 0, true};
+        auto* buf = new MRBuffer{std::move(owned), ptr, 0, true, size_bytes};
         *out_buffer = buf;
     });
 }
@@ -197,6 +215,20 @@ Launch build_launch(const MRLaunchDesc* launch_desc, const char* who) {
     if (!launch_desc) throw std::invalid_argument(std::string(who) + ": launch is null");
     if (!launch_desc->pipeline)
         throw std::invalid_argument(std::string(who) + ": launch has no pipeline");
+    if (launch_desc->buffer_count && (!launch_desc->buffers || !launch_desc->buffer_offsets)) {
+        throw std::invalid_argument(std::string(who) +
+                                    ": buffers and buffer_offsets are required when buffer_count "
+                                    "is nonzero");
+    }
+    if (launch_desc->scalar_count && (!launch_desc->scalars || !launch_desc->scalar_sizes)) {
+        throw std::invalid_argument(std::string(who) +
+                                    ": scalars and scalar_sizes are required when scalar_count is "
+                                    "nonzero");
+    }
+    if (launch_desc->threadgroup_memory_count && !launch_desc->threadgroup_memory) {
+        throw std::invalid_argument(std::string(who) +
+                                    ": threadgroup_memory is required when its count is nonzero");
+    }
 
     Launch launch;
     launch.pipeline = launch_desc->pipeline->pipeline.get();
@@ -205,16 +237,30 @@ Launch build_launch(const MRLaunchDesc* launch_desc, const char* who) {
             throw std::invalid_argument(std::string(who) + ": buffers[" + std::to_string(i) +
                                         "] is null");
         }
-        launch.buffers.emplace_back(
-            &launch_desc->buffers[i]->buffer,
-            launch_desc->buffer_offsets[i] + launch_desc->buffers[i]->external_offset);
+        const MRBuffer& buffer = *launch_desc->buffers[i];
+        size_t offset = launch_desc->buffer_offsets[i];
+        if ((offset >= buffer.logical_size && !(offset == 0 && buffer.logical_size == 0)) ||
+            offset > std::numeric_limits<size_t>::max() - buffer.external_offset) {
+            throw std::invalid_argument(std::string(who) + ": buffers[" + std::to_string(i) +
+                                        "] offset " + std::to_string(offset) +
+                                        " is out of bounds for a logical buffer of " +
+                                        std::to_string(buffer.logical_size) + " bytes");
+        }
+        launch.buffers.emplace_back(&launch_desc->buffers[i]->buffer,
+                                    offset + buffer.external_offset);
     }
     for (size_t i = 0; i < launch_desc->scalar_count; ++i) {
+        if (!launch_desc->scalars[i]) {
+            throw std::invalid_argument(std::string(who) + ": scalars[" + std::to_string(i) +
+                                        "] is null");
+        }
         launch.scalars.emplace_back(launch_desc->scalars[i], launch_desc->scalar_sizes[i]);
     }
-    launch.threadgroup_memory.assign(
-        launch_desc->threadgroup_memory,
-        launch_desc->threadgroup_memory + launch_desc->threadgroup_memory_count);
+    if (launch_desc->threadgroup_memory_count) {
+        launch.threadgroup_memory.assign(
+            launch_desc->threadgroup_memory,
+            launch_desc->threadgroup_memory + launch_desc->threadgroup_memory_count);
+    }
     launch.grid = {launch_desc->grid_x, launch_desc->grid_y, launch_desc->grid_z};
 
     if (launch_desc->threadgroup_x == 0) {

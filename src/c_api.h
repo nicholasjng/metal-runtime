@@ -62,6 +62,8 @@ void mr_release_pipeline(MRPipeline* pipeline);
 // the rounded range would reach outside ptr's actual VM mapping (checked
 // via mach_vm_region before ever handing memory to Metal). Caller keeps
 // owning `ptr`; this never frees it.
+// Dispatch offsets are checked against size_bytes, excluding page padding.
+// Unrepresentable address ranges are rejected as MR_ERROR_INVALID_ARGUMENT.
 //
 // Real xla::ffi::Buffer<F32> pointers were measured page-aligned on neither
 // `ptr` nor `size_bytes`, so page-rounding is the path that actually matters,
