@@ -11,6 +11,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "buffer.h"
@@ -232,15 +233,15 @@ Launch build_launch(const MRLaunchDesc* launch_desc, const char* who) {
                                         " is out of bounds for a logical buffer of " +
                                         std::to_string(buffer.logical_size) + " bytes");
         }
-        launch.buffers.emplace_back(&launch_desc->buffers[i]->buffer,
-                                    offset + buffer.external_offset);
+        launch.buffers.push_back(
+            {&launch_desc->buffers[i]->buffer, offset + buffer.external_offset});
     }
     for (size_t i = 0; i < launch_desc->scalar_count; ++i) {
         if (!launch_desc->scalars[i]) {
             throw std::invalid_argument(std::string(who) + ": scalars[" + std::to_string(i) +
                                         "] is null");
         }
-        launch.scalars.emplace_back(launch_desc->scalars[i], launch_desc->scalar_sizes[i]);
+        launch.scalars.push_back({launch_desc->scalars[i], launch_desc->scalar_sizes[i]});
     }
     if (launch_desc->threadgroup_memory_count) {
         launch.threadgroup_memory.assign(

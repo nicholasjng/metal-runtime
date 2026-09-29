@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <string>
+#include <utility>
 
 #include "metal.h"
 #include "runtime.h"
@@ -213,9 +214,9 @@ void CommandBatch::add(const Launch& launch) {
                                     max_threadgroup_memory_);
 
     for (const auto& scalar : launch.scalars) {
-        if (scalar.second > kMaxInlineScalarBytes) {
+        if (scalar.size > kMaxInlineScalarBytes) {
             throw std::invalid_argument("dispatch: inline scalar of " +
-                                        std::to_string(scalar.second) + " bytes exceeds Metal's " +
+                                        std::to_string(scalar.size) + " bytes exceeds Metal's " +
                                         std::to_string(kMaxInlineScalarBytes) +
                                         "-byte setBytes limit; pass it as a Buffer instead");
         }
@@ -251,7 +252,7 @@ void CommandBatch::add(const Launch& launch) {
         encoder_->setBuffer(buffer->handle(), offset, index++);
     }
     for (const auto& scalar : launch.scalars) {
-        encoder_->setBytes(scalar.first, scalar.second, index++);
+        encoder_->setBytes(scalar.data, scalar.size, index++);
     }
     for (size_t i = 0; i < launch.threadgroup_memory.size(); ++i) {
         encoder_->setThreadgroupMemoryLength(
@@ -304,8 +305,7 @@ void CommandBatch::wait() {
     }
 
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (!waited_) {
-        waited_ = true;
+    if (!gpu_time_) {
         gpu_time_ = command_buffer_->GPUEndTime() - command_buffer_->GPUStartTime();
     }
 
