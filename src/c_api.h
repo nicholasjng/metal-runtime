@@ -88,20 +88,15 @@ typedef struct MRLaunchDesc {
 // Encodes one launch and waits for it.
 MR_EXPORT MRStatus mr_dispatch(const MRLaunchDesc* launch, char** out_err_msg);
 
-// Encodes and submits one launch without blocking. On MR_OK, *out_batch owns
-// the in-flight work: mr_batch_wait blocks on it, mr_release_batch frees the
-// handle. Releasing without waiting leaves faults unreported.
-MR_EXPORT MRStatus mr_dispatch_async(const MRLaunchDesc* launch, MRBatch** out_batch,
-                                     char** out_err_msg);
-
-// Blocks until the batch completes; a faulted command buffer is MR_ERROR_DISPATCH.
-MR_EXPORT MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg);
-
-// Several launches in one command buffer: create, add each launch (the
-// descriptor is copied, so its arrays may change afterwards), commit, wait.
+// Launches in one command buffer: create, add each launch (the descriptor is
+// copied, so its arrays may change afterwards), commit, wait. Commit submits
+// without blocking. Releasing without waiting leaves faults unreported.
 MR_EXPORT MRStatus mr_batch_create(MRBatch** out_batch, char** out_err_msg);
 MR_EXPORT MRStatus mr_batch_add(MRBatch* batch, const MRLaunchDesc* launch, char** out_err_msg);
 MR_EXPORT MRStatus mr_batch_commit(MRBatch* batch, char** out_err_msg);
+
+// Commits if needed, then blocks; a faulted command buffer is MR_ERROR_DISPATCH.
+MR_EXPORT MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg);
 
 MR_EXPORT void mr_release_batch(MRBatch* batch);
 
