@@ -247,8 +247,7 @@ Library::Library(MTL::Device* device, const std::string& msl_source, const Compi
     NS::String* source = NS::String::string(msl_source.c_str(), NS::UTF8StringEncoding);
     library_ = NS::TransferPtr(device->newLibrary(source, build_options(options), &error));
     if (!library_) {
-        std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
-        throw MSLCompileError("MSL compile error: " + message);
+        throw MSLCompileError("MSL compile error: " + describe(error));
     }
 }
 
@@ -332,9 +331,8 @@ NS::SharedPtr<MTL::Function> Library::create_specialized(const std::string& name
     NS::SharedPtr<MTL::Function> fn =
         NS::TransferPtr(library_->newFunction(fn_name, values, &error));
     if (!fn) {
-        std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
         throw MSLCompileError("failed to specialize MSL function '" + name +
-                              "' with the given constants: " + message);
+                              "' with the given constants: " + describe(error));
     }
     return fn;
 }
