@@ -43,7 +43,7 @@ add_library(metal-cpp INTERFACE)
 target_include_directories(metal-cpp INTERFACE "${METAL_CPP_INCLUDE}")
 target_compile_definitions(metal-cpp INTERFACE METALCPP_SYMBOL_VISIBILITY_HIDDEN)
 target_link_libraries(metal-cpp INTERFACE
-  "-framework Foundation" "-framework Metal" "-framework QuartzCore")
+  "-framework Foundation" "-framework Metal")
 
 # One shared library: runtime, metal-cpp implementation, and the C API. The
 # Python extension links against it, so a process hosting both (e.g. an XLA
