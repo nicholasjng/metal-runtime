@@ -25,19 +25,13 @@ def test_assemble_escapes_labels():
     assert src.startswith('#line 1 "we\\"ird\\\\label"\n')
 
 
-def _includes() -> mr.Fragment:
-    return mr.Fragment(
-        "includes", "\n".join(f"#include <{name}>" for name in mr.DEFAULT_INCLUDES)
-    )
-
-
 def test_default_includes_are_metal_stdlib():
-    assert mr.DEFAULT_INCLUDES == ("metal_stdlib",)
+    assert mr.DEFAULT_INCLUDES == mr.Fragment("includes", "#include <metal_stdlib>")
 
 
 def test_kernel_compiles_and_runs_with_default_includes():
     kernel = mr.Kernel(
-        mr.assemble(_includes(), mr.Fragment("body", ADD_ONE_BODY)), "add_one"
+        mr.assemble(mr.DEFAULT_INCLUDES, mr.Fragment("body", ADD_ONE_BODY)), "add_one"
     )
     buf = mr.Buffer(np.zeros(8, dtype=np.float32))
     mr.run(kernel, grid=(8, 1, 1), buffers=[buf])
@@ -46,7 +40,7 @@ def test_kernel_compiles_and_runs_with_default_includes():
 
 def test_compile_error_is_attributed_to_the_failing_fragment():
     src = mr.assemble(
-        _includes(),
+        mr.DEFAULT_INCLUDES,
         mr.Fragment("helpers", "float broken(float x) { return y; }"),
         mr.Fragment("body", ADD_ONE_BODY),
     )
