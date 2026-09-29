@@ -3,8 +3,6 @@ import types
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Self
 
-import jax
-import mlx.core
 import numpy
 from numpy.typing import NDArray
 
@@ -13,8 +11,6 @@ class CompileError(Exception): ...
 class FunctionNotFoundError(CompileError): ...
 class PipelineBuildError(CompileError): ...
 class DispatchError(Exception): ...
-class AllocationError(MemoryError): ...
-class PipelineCacheError(OSError): ...
 class CaptureError(Exception): ...
 
 def start_capture(path: str) -> None:
@@ -59,26 +55,6 @@ def device_info() -> dict:
         max_buffer_length, supports_non_uniform_threadgroups.
     """
 
-def supported_gpu_families() -> dict[str, int]:
-    """
-    Highest supported MTLGPUFamily index per family group, via
-    `-[MTLDevice supportsFamily:]`.
-
-    Groups: "apple" (chip generation), "mac" (legacy discrete/Intel),
-    "common" (cross-platform baseline), "metal" (Metal-N feature-set
-    shorthand). Each is cumulative -- supporting N implies every lower N
-    in that group -- so check a documented family floor with e.g.
-    `families.get("apple", 0) >= 9`. A missing key means unsupported.
-
-    Necessary, not sufficient: a specific optional feature can also be
-    gated behind a deployment target or language version this call
-    doesn't know about. Compiling is the only fully authoritative check.
-
-    Returns
-    -------
-    dict of str to int
-    """
-
 def supported_dtypes() -> str:
     """
     Comma-separated list of dtype names Buffer accepts.
@@ -119,54 +95,6 @@ def set_library_cache_limit(limit: int) -> None:
 
 def clear_library_cache() -> None:
     """Drop every cached library."""
-
-def set_pipeline_cache_dir(path: str | None) -> None:
-    """
-    Enable or disable the persistent pipeline cache.
-
-    Parameters
-    ----------
-    path : str or None
-        Loads an existing archive at this path if one exists, else starts
-        an empty one. None turns caching back off. Call once at startup,
-        not concurrently with kernel construction.
-    """
-
-def pipeline_cache_dir() -> str | None:
-    """
-    Path of the active pipeline cache, if one is configured.
-
-    Returns
-    -------
-    str or None
-    """
-
-def save_pipeline_cache() -> None:
-    """
-    Write the pipeline cache to its configured path.
-
-    Raises
-    ------
-    ValueError
-        No pipeline cache directory is set.
-    PipelineCacheError
-        Writing the file failed.
-    """
-
-def pipeline_cache_status() -> dict:
-    """
-    Staging health of the active pipeline cache.
-
-    Failing to stage a pipeline into the cache is deliberately non-fatal (the
-    pipeline itself built and runs); this is where those failures surface.
-    Counters reset when set_pipeline_cache_dir() replaces the archive.
-
-    Returns
-    -------
-    dict
-        ``dir`` (str or None), ``add_failures`` (int), and ``last_error``
-        (str or None, the most recent failure message).
-    """
 
 class Buffer:
     def __init__(
@@ -258,24 +186,6 @@ class Buffer:
             dtype is bfloat16, which NumPy has no native dtype for.
         """
 
-    def to_jax(self) -> jax.Array:
-        """
-        This buffer as a JAX array, via DLPack. Zero-copy.
-
-        Returns
-        -------
-        jax.Array
-        """
-
-    def to_mlx(self) -> mlx.core.array:
-        """
-        This buffer as an MLX array, via DLPack. Zero-copy.
-
-        Returns
-        -------
-        mlx.core.array
-        """
-
     def __dlpack__(self, **kwargs) -> Any:
         """
         DLPack capsule for this buffer's memory. Zero-copy. Supports copy=None/False, stream=None, dl_device=(1, 0), and max_version=None. Unsupported protocol options are rejected instead of ignored.
@@ -301,9 +211,6 @@ class Buffer:
     @property
     def nbytes(self) -> int:
         """Byte count."""
-
-    def __len__(self) -> int:
-        """Length of the first dimension."""
 
 class MathMode(enum.StrEnum):
     """
@@ -476,21 +383,6 @@ class Batch:
     def gpu_time(self) -> float | None:
         """Device-side execution seconds for the whole batch, set by wait()."""
 
-    @property
-    def timestamps(self) -> dict | None:
-        """
-        Command buffer timestamps in one common epoch (seconds), or None
-        before wait().
-
-        Returns
-        -------
-        dict or None
-            Keys: kernel_start, kernel_end (driver), gpu_start, gpu_end
-            (device). `gpu_start - kernel_end` is how long the submission
-            waited for the GPU; wait()'s wall time minus
-            `gpu_end - kernel_start` is the host wake-up cost.
-        """
-
     def __enter__(self) -> Self:
         """Returns self."""
 
@@ -503,23 +395,3 @@ class Batch:
         """
         Waits on the batch if the body didn't raise; otherwise discards it without committing.
         """
-
-class Capture:
-    def __init__(self, path: str) -> None:
-        """
-        Capture command queues on this runtime's Metal device to a GPU trace document.
-
-        Use as a context manager to stop the capture even if the body raises:
-        ``with metal_runtime.Capture("profile.gputrace"): ...``.
-        """
-
-    def __enter__(self) -> Self:
-        """Start the capture and return self."""
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: types.TracebackType | None,
-    ) -> None:
-        """Stop the capture."""

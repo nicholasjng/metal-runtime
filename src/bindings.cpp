@@ -34,16 +34,15 @@ namespace {
 
 using HostArray = nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu>;
 
-// Grid and threadgroup extents accept a bare int for the common 1D case.
+// A bare int is the 1D case.
 using Extent = std::variant<size_t, std::vector<size_t>>;
 
 class PyBuffer;
 
-// Host extents, or a Buffer of three uint32 threadgroup counts the GPU
-// reads at dispatch time (indirect).
+// Host extents, or a Buffer of three uint32 threadgroup counts (indirect).
 using GridArg = std::variant<size_t, std::vector<size_t>, PyBuffer*>;
 
-// A buffer binding, optionally at a byte offset into the allocation.
+// A buffer binding, optionally at a byte offset.
 using BufferArg = std::variant<PyBuffer*, std::pair<PyBuffer*, size_t>>;
 
 Dim3 to_dim3(size_t n, const char*) {
@@ -116,9 +115,7 @@ size_t checked_element_count(const std::vector<size_t>& shape) {
     return count;
 }
 
-// Resolves the dtype a buffer's bytes should be labelled with.
-// An explicit name reinterprets rather than converts (numpy's `.view` semantics),
-// which is the way in for element types NumPy itself can't hand across the boundary.
+// An explicit dtype name reinterprets the bytes (`.view` semantics).
 DType resolve_dtype(const HostArray& array, const std::optional<std::string>& override_name) {
     if (!override_name) return from_dlpack(array.dtype());
 
@@ -126,8 +123,6 @@ DType resolve_dtype(const HostArray& array, const std::optional<std::string>& ov
     if (array.dtype().lanes != 1) {
         throw std::invalid_argument("vector dtypes are not supported; pass a scalar dtype");
     }
-    // The only invariant reinterpretation has to preserve is element width,
-    // so that the shape and the byte count still agree.
     if (array.itemsize() != requested.itemsize()) {
         throw std::invalid_argument(
             "dtype '" + *override_name + "' is " + std::to_string(requested.itemsize()) +
@@ -138,32 +133,23 @@ DType resolve_dtype(const HostArray& array, const std::optional<std::string>& ov
     return requested;
 }
 
-// Tracks shape and dtype from construction so to_numpy() can hand back a view
-// shaped and typed like the original array.
 class PyBuffer {
    public:
     explicit PyBuffer(HostArray array, const std::optional<std::string>& dtype)
-        : shape_(array.shape_ptr(), array.shape_ptr() + array.ndim()),
-          dtype_(resolve_dtype(array, dtype)),
-          buffer_(std::make_unique<Buffer>(runtime().device(), nbytes())) {
+        : PyBuffer(std::vector<size_t>(array.shape_ptr(), array.shape_ptr() + array.ndim()),
+                   resolve_dtype(array, dtype), /*zero_fill=*/false) {
         std::memcpy(buffer_->contents(), array.data(), array.nbytes());
     }
 
-    // No upload: for kernels that write every output element themselves
-    // (a Pallas rollout's out_ref). Zero-initialized rather than left
-    // uninitialized, cheap next to the upload path it replaces, and it rules
-    // out reading back garbage from a kernel that misses an element.
     static PyBuffer zeros(std::vector<size_t> shape, const std::string& dtype) {
         return PyBuffer(std::move(shape), dtype_from_name(dtype), /*zero_fill=*/true);
     }
 
-    // Uninitialized: no memset, for outputs a kernel overwrites entirely.
     static PyBuffer empty(std::vector<size_t> shape, const std::string& dtype) {
         return PyBuffer(std::move(shape), dtype_from_name(dtype), /*zero_fill=*/false);
     }
 
-    // Refills the allocation in place. Reinterprets via `dtype` like the
-    // constructor; shape may differ, byte count may not.
+    // Shape may differ, byte count may not.
     void copy_from(const HostArray& array, const std::optional<std::string>& dtype) {
         DType incoming = resolve_dtype(array, dtype);
         if (incoming != dtype_) {
@@ -181,7 +167,7 @@ class PyBuffer {
         std::memcpy(buffer_->contents(), array.data(), array.nbytes());
     }
 
-    nb::ndarray<nb::numpy> to_numpy(const std::optional<std::string>& dtype) {
+    nb::ndarray<nb::numpy> to_numpy(const std::optional<std::string>& dtype) const {
         DType out = dtype_;
         if (dtype) {
             out = dtype_from_name(*dtype);
@@ -201,48 +187,44 @@ class PyBuffer {
                                       nb::find(*this), nullptr, to_dlpack(out));
     }
 
-    // JAX and MLX both consume a DLPack capsule directly (jax.dlpack.from_dlpack,
-    // mlx.core.array) without going through NumPy's dtype table, so they carry
-    // bfloat16 (and anything else DType supports) through untouched.
-    nb::ndarray<nb::jax> to_jax() { return as_ndarray<nb::jax>(); }
-    nb::ndarray<nb::mlx> to_mlx() { return as_ndarray<nb::mlx>(); }
-
-    nb::ndarray<> to_dlpack_ndarray() { return as_ndarray<>(); }
+    // A raw capsule skips NumPy's dtype table, so bfloat16 exports too.
+    nb::ndarray<> to_dlpack_ndarray() const {
+        return nb::ndarray<>(buffer_->contents(), shape_.size(), shape_.data(), nb::find(*this),
+                             nullptr, to_dlpack(dtype_));
+    }
 
     Buffer* buffer() { return buffer_.get(); }
 
     const std::vector<size_t>& shape() const { return shape_; }
     const char* dtype() const { return dtype_name(dtype_); }
-    size_t size() const { return checked_element_count(shape_); }
-    size_t nbytes() const {
-        size_t count = size();
-        if (count != 0 && dtype_.itemsize() > SIZE_MAX / count) {
-            throw std::invalid_argument("buffer shape is too large: byte size overflows");
-        }
-        return count * dtype_.itemsize();
-    }
+    size_t size() const { return size_; }
+    size_t nbytes() const { return nbytes_; }
 
    private:
-    template <typename... Framework>
-    nb::ndarray<Framework...> as_ndarray() {
-        return nb::ndarray<Framework...>(buffer_->contents(), shape_.size(), shape_.data(),
-                                         nb::find(*this), nullptr, to_dlpack(dtype_));
-    }
-
     PyBuffer(std::vector<size_t> shape, DType dtype, bool zero_fill)
         : shape_(std::move(shape)),
           dtype_(dtype),
-          buffer_(std::make_unique<Buffer>(runtime().device(), nbytes())) {
-        if (zero_fill) std::memset(buffer_->contents(), 0, nbytes());
+          size_(checked_element_count(shape_)),
+          nbytes_(checked_byte_count(size_, dtype_)),
+          buffer_(std::make_unique<Buffer>(runtime().device(), nbytes_)) {
+        if (zero_fill) std::memset(buffer_->contents(), 0, nbytes_);
+    }
+
+    static size_t checked_byte_count(size_t count, DType dtype) {
+        if (count != 0 && dtype.itemsize() > SIZE_MAX / count) {
+            throw std::invalid_argument("buffer shape is too large: byte size overflows");
+        }
+        return count * dtype.itemsize();
     }
 
     std::vector<size_t> shape_;
     DType dtype_;
+    size_t size_;
+    size_t nbytes_;
     std::unique_ptr<Buffer> buffer_;
 };
 
-// bool/int/float coerce to the declared MSL type at specialization;
-// a numpy scalar pins an exact width that must match the declaration.
+// Python scalars coerce to the declared MSL type; a numpy scalar must match it exactly.
 FunctionConstants parse_constants(const nb::dict& constants) {
     FunctionConstants out;
     out.reserve(constants.size());
@@ -255,8 +237,6 @@ FunctionConstants parse_constants(const nb::dict& constants) {
             c.bool_value = nb::cast<bool>(value);
         } else if (nb::isinstance<nb::int_>(value)) {
             c.kind = FunctionConstant::Kind::Int;
-            // A value meant for a `ulong` constant past INT64_MAX needs the
-            // unsigned path, or the cast fails before reaching coerce().
             long long v;
             if (nb::try_cast<long long>(value, v)) {
                 c.int_value = v;
@@ -282,7 +262,7 @@ FunctionConstants parse_constants(const nb::dict& constants) {
         }
         out.push_back(std::move(c));
     }
-    // Sorted so {a,b} and {b,a} hit the same pipeline cache entry.
+    // Sorted so the cache key is order-independent.
     std::sort(out.begin(), out.end(),
               [](const FunctionConstant& a, const FunctionConstant& b) { return a.name < b.name; });
     return out;
@@ -294,8 +274,7 @@ class PyKernel {
              const std::map<std::string, std::string>& defines, const nb::dict& constants)
         : options_{math_mode, defines},
           library_(runtime().library_for(msl_source, options_)),
-          pipeline_(library_->pipeline_for(function_name, parse_constants(constants),
-                                           runtime().pipeline_archive())),
+          pipeline_(library_->pipeline_for(function_name, parse_constants(constants))),
           function_name_(function_name) {
         for (auto [key, value] : constants) constants_[key] = value;
     }
@@ -308,22 +287,15 @@ class PyKernel {
     const std::string& function_name() const { return function_name_; }
 
    private:
-    // Declared before library_: library_'s initializer reads it, and members
-    // are initialized in declaration order.
-    CompileOptions options_;
-    // Held, not just borrowed: the library cache evicts, and a pipeline built
-    // from an evicted Library must not be the thing that discovers it.
-    std::shared_ptr<Library> library_;
-    // Shared with the library's pipeline cache.
+    CompileOptions options_;            // initialized before library_ reads it
+    std::shared_ptr<Library> library_;  // held: the library cache evicts
     std::shared_ptr<ComputePipeline> pipeline_;
     std::string function_name_;
     nb::dict constants_;
 };
 
-// A Launch plus everything it points into. The Python objects behind the
-// buffers are pinned here because dispatch runs with the GIL released: on a
-// free-threaded interpreter another thread clearing the caller's list would
-// otherwise be free to drop the last reference mid-kernel.
+// A Launch plus the Python objects it points into, pinned because dispatch
+// runs with the GIL released.
 struct PreparedLaunch {
     Launch launch;
     std::vector<nb::object> keepalive;
@@ -397,18 +369,14 @@ void run(PyKernel& kernel, const GridArg& grid, const std::optional<Extent>& thr
          const std::vector<size_t>& threadgroup_memory, size_t indirect_offset) {
     PreparedLaunch prepared = prepare(kernel, grid, threadgroup, buffers, std::move(scalars),
                                       threadgroup_memory, indirect_offset);
-    // Released only around the blocking part, and only after every Python
-    // object the launch touches is pinned above.
     nb::gil_scoped_release release;
-    dispatch(runtime().queue(), prepared.launch);
+    dispatch(runtime(), prepared.launch);
 }
 
-// Several kernels in one command buffer: one commit and one GPU round-trip
-// for the whole sequence.
 class PyBatch {
    public:
     explicit PyBatch(bool concurrent)
-        : batch_(std::make_unique<CommandBatch>(runtime().queue(), concurrent)) {}
+        : batch_(std::make_unique<CommandBatch>(runtime(), concurrent)) {}
 
     void add(PyKernel& kernel, const GridArg& grid, const std::optional<Extent>& threadgroup,
              const std::vector<BufferArg>& buffers, std::vector<HostArray> scalars,
@@ -417,9 +385,7 @@ class PyBatch {
                                           threadgroup_memory, indirect_offset);
         std::lock_guard<std::mutex> lock(keepalive_mutex_);
         batch_->add(prepared.launch);
-        // The batch is committed later, so its buffers have to stay alive
-        // until then, not just until this call returns. Deduplicated: a
-        // stepping loop re-adds the same kernel and buffers per launch.
+        // Pinned until wait(); deduplicated for stepping loops.
         for (nb::object& obj : prepared.keepalive) {
             if (pinned_.insert(obj.ptr()).second) keepalive_.push_back(std::move(obj));
         }
@@ -437,9 +403,7 @@ class PyBatch {
             nb::gil_scoped_release release;
             batch_->wait();
         }
-        // Decref outside the lock: Python finalizers may re-enter this batch.
-        // Never hold this mutex while releasing/reacquiring the GIL or waiting
-        // for GPU completion.
+        // Decref outside the lock: finalizers may re-enter this batch.
         std::vector<nb::object> released;
         {
             std::lock_guard<std::mutex> lock(keepalive_mutex_);
@@ -450,48 +414,11 @@ class PyBatch {
 
     std::optional<double> gpu_time() const { return batch_->gpu_time(); }
 
-    std::optional<nb::dict> timestamps() const {
-        std::optional<CommandBatch::Timestamps> t = batch_->timestamps();
-        if (!t) return std::nullopt;
-        nb::dict out;
-        out["kernel_start"] = t->kernel_start;
-        out["kernel_end"] = t->kernel_end;
-        out["gpu_start"] = t->gpu_start;
-        out["gpu_end"] = t->gpu_end;
-        return out;
-    }
-
    private:
     std::unique_ptr<CommandBatch> batch_;
     std::mutex keepalive_mutex_;
     std::vector<nb::object> keepalive_;
     std::unordered_set<PyObject*> pinned_;
-};
-
-// Python context manager for a trace around an arbitrary block of dispatches.
-class PyCapture {
-   public:
-    explicit PyCapture(std::string path) : path_(std::move(path)) {}
-
-    PyCapture& enter() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (active_) throw CaptureError("this Capture context is already active");
-        runtime().start_capture(path_);
-        active_ = true;
-        return *this;
-    }
-
-    void exit() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!active_) throw CaptureError("this Capture context is not active");
-        runtime().stop_capture();
-        active_ = false;
-    }
-
-   private:
-    std::string path_;
-    std::mutex mutex_;
-    bool active_ = false;
 };
 
 #define METAL_RUNTIME_LAUNCH_PARAMS                           \
@@ -520,11 +447,8 @@ nb::dict device_info() {
 }  // namespace
 
 NB_MODULE(_core, m) {
-    // Registration order matters: nanobind prepends translators and tries them
-    // most-recent-first, so a derived C++ exception has to be registered after
-    // its base or the base's translator would swallow it. FunctionNotFoundError
-    // hangs off CompileError so one `except CompileError` catches both halves of
-    // "the generated MSL is wrong".
+    // nanobind tries translators most-recent-first, so a derived exception
+    // must be registered after its base.
     [[maybe_unused]] nb::object device_error = nb::exception<NoDeviceError>(m, "DeviceError");
     nb::object compile_error = nb::exception<MSLCompileError>(m, "CompileError");
     [[maybe_unused]] nb::object not_found =
@@ -532,11 +456,14 @@ NB_MODULE(_core, m) {
     [[maybe_unused]] nb::object pipeline_build_error =
         nb::exception<PipelineBuildError>(m, "PipelineBuildError", compile_error);
     [[maybe_unused]] nb::object dispatch_error = nb::exception<DispatchError>(m, "DispatchError");
-    [[maybe_unused]] nb::object allocation_error =
-        nb::exception<AllocationError>(m, "AllocationError", PyExc_MemoryError);
-    [[maybe_unused]] nb::object pipeline_cache_error =
-        nb::exception<PipelineCacheError>(m, "PipelineCacheError", PyExc_OSError);
     [[maybe_unused]] nb::object capture_error = nb::exception<CaptureError>(m, "CaptureError");
+    nb::register_exception_translator([](const std::exception_ptr& p, void*) {
+        try {
+            std::rethrow_exception(p);
+        } catch (const AllocationError& e) {
+            PyErr_SetString(PyExc_MemoryError, e.what());
+        }
+    });
 
     m.def(
         "start_capture", [](const std::string& path) { runtime().start_capture(path); }, "path"_a,
@@ -580,26 +507,6 @@ dict
     max_threads_per_threadgroup, max_threadgroup_memory_length,
     max_buffer_length, supports_non_uniform_threadgroups.
 )doc");
-    m.def(
-        "supported_gpu_families", []() { return runtime().supported_gpu_families(); },
-        R"doc(
-Highest supported MTLGPUFamily index per family group, via
-`-[MTLDevice supportsFamily:]`.
-
-Groups: "apple" (chip generation), "mac" (legacy discrete/Intel),
-"common" (cross-platform baseline), "metal" (Metal-N feature-set
-shorthand). Each is cumulative -- supporting N implies every lower N
-in that group -- so check a documented family floor with e.g.
-`families.get("apple", 0) >= 9`. A missing key means unsupported.
-
-Necessary, not sufficient: a specific optional feature can also be
-gated behind a deployment target or language version this call
-doesn't know about. Compiling is the only fully authoritative check.
-
-Returns
--------
-dict of str to int
-)doc");
     m.def("supported_dtypes", &supported_dtype_names,
           R"doc(
 Comma-separated list of dtype names Buffer accepts.
@@ -642,64 +549,6 @@ limit : int
     m.def(
         "clear_library_cache", []() { runtime().clear_library_cache(); },
         "Drop every cached library.");
-
-    m.def(
-        "set_pipeline_cache_dir",
-        [](std::optional<std::string> path) { runtime().set_pipeline_cache_dir(path); }, "path"_a,
-        R"doc(
-Enable or disable the persistent pipeline cache.
-
-Parameters
-----------
-path : str or None
-    Loads an existing archive at this path if one exists, else starts
-    an empty one. None turns caching back off. Call once at startup,
-    not concurrently with kernel construction.
-)doc");
-    m.def(
-        "pipeline_cache_dir", []() { return runtime().pipeline_cache_dir(); },
-        R"doc(
-Path of the active pipeline cache, if one is configured.
-
-Returns
--------
-str or None
-)doc");
-    m.def(
-        "save_pipeline_cache", []() { runtime().save_pipeline_cache(); },
-        R"doc(
-Write the pipeline cache to its configured path.
-
-Raises
-------
-ValueError
-    No pipeline cache directory is set.
-PipelineCacheError
-    Writing the file failed.
-)doc");
-    m.def(
-        "pipeline_cache_status",
-        []() {
-            auto stats = runtime().archive_add_stats();
-            nb::dict status;
-            status["dir"] = runtime().pipeline_cache_dir();
-            status["add_failures"] = stats.failures;
-            status["last_error"] = stats.failures ? nb::cast(stats.last_error) : nb::none();
-            return status;
-        },
-        R"doc(
-Staging health of the active pipeline cache.
-
-Failing to stage a pipeline into the cache is deliberately non-fatal (the
-pipeline itself built and runs); this is where those failures surface.
-Counters reset when set_pipeline_cache_dir() replaces the archive.
-
-Returns
--------
-dict
-    ``dir`` (str or None), ``add_failures`` (int), and ``last_error``
-    (str or None, the most recent failure message).
-)doc");
 
     nb::class_<PyBuffer>(m, "Buffer")
         .def(nb::init<HostArray, const std::optional<std::string>&>(), "array"_a,
@@ -777,22 +626,6 @@ Raises
 TypeError
     dtype is bfloat16, which NumPy has no native dtype for.
 )doc")
-        .def("to_jax", &PyBuffer::to_jax,
-             R"doc(
-This buffer as a JAX array, via DLPack. Zero-copy.
-
-Returns
--------
-jax.Array
-)doc")
-        .def("to_mlx", &PyBuffer::to_mlx,
-             R"doc(
-This buffer as an MLX array, via DLPack. Zero-copy.
-
-Returns
--------
-mlx.core.array
-)doc")
         .def(
             "__dlpack__",
             [](PyBuffer& b, nb::kwargs kwargs) {
@@ -816,7 +649,11 @@ mlx.core.array
                                 "Metal shared memory");
                         }
                     } else if (name == "dl_device") {
-                        auto device = nb::cast<std::pair<int, int>>(value);
+                        std::pair<int, int> device{1, 0};
+                        if (!value.is_none() && !nb::try_cast(value, device)) {
+                            throw nb::type_error(
+                                "Buffer.__dlpack__(dl_device=...) expects a tuple");
+                        }
                         if (device != std::pair<int, int>{1, 0}) {
                             throw nb::type_error(
                                 "Buffer.__dlpack__ only supports dl_device=(1, 0) (CPU)");
@@ -832,9 +669,6 @@ mlx.core.array
                         throw nb::type_error(message.c_str());
                     }
                 }
-                // nb::ndarray<> (no framework) casts directly to a raw DLPack capsule.
-                // Unlike routing through to_numpy(), this never consults NumPy's dtype
-                // table, so bfloat16 (and anything else DType supports) exports fine.
                 return b.to_dlpack_ndarray();
             },
             nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"),
@@ -842,9 +676,7 @@ mlx.core.array
             "stream=None, dl_device=(1, 0), and max_version=None. Unsupported protocol "
             "options are rejected instead of ignored.")
         .def(
-            "__dlpack_device__",
-            // (kDLCPU, 0): unified memory, so the bytes are host-addressable.
-            [](PyBuffer&) { return nb::make_tuple(1, 0); },
+            "__dlpack_device__", [](PyBuffer&) { return nb::make_tuple(1, 0); },
             "DLPack device tuple: (kDLCPU, 0), since Metal's shared storage is "
             "host-addressable.")
         .def_prop_ro(
@@ -858,13 +690,6 @@ mlx.core.array
         .def_prop_ro("dtype", &PyBuffer::dtype, "dtype name, e.g. 'float32'.")
         .def_prop_ro("size", &PyBuffer::size, "Element count.")
         .def_prop_ro("nbytes", &PyBuffer::nbytes, "Byte count.")
-        .def(
-            "__len__",
-            [](const PyBuffer& b) {
-                if (b.shape().empty()) throw nb::type_error("len() of unsized object");
-                return b.shape()[0];
-            },
-            "Length of the first dimension.")
         .def("__repr__", [](const PyBuffer& b) {
             std::string out = "Buffer(shape=(";
             for (size_t i = 0; i < b.shape().size(); ++i) {
@@ -1011,28 +836,13 @@ DispatchError
 )doc")
         .def_prop_ro("gpu_time", &PyBatch::gpu_time,
                      "Device-side execution seconds for the whole batch, set by wait().")
-        .def_prop_ro("timestamps", &PyBatch::timestamps,
-                     R"doc(
-Command buffer timestamps in one common epoch (seconds), or None
-before wait().
-
-Returns
--------
-dict or None
-    Keys: kernel_start, kernel_end (driver), gpu_start, gpu_end
-    (device). `gpu_start - kernel_end` is how long the submission
-    waited for the GPU; wait()'s wall time minus
-    `gpu_end - kernel_start` is the host wake-up cost.
-)doc")
         .def(
             "__enter__", [](PyBatch& b) { return &b; }, nb::rv_policy::reference_internal,
             nb::sig("def __enter__(self) -> typing.Self"), "Returns self.")
         .def(
             "__exit__",
             [](PyBatch& b, nb::handle exc_type, nb::handle, nb::handle) {
-                // Nothing is committed if the body raised: the destructor
-                // closes the encoder and drops the command buffer instead,
-                // so a half-encoded sequence never reaches the GPU.
+                // If the body raised, the destructor discards the batch uncommitted.
                 if (exc_type.is_none()) b.wait();
             },
             nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
@@ -1040,22 +850,4 @@ dict or None
                     "BaseException | None, traceback: types.TracebackType | None) -> None"),
             "Waits on the batch if the body didn't raise; otherwise discards it "
             "without committing.");
-
-    nb::class_<PyCapture>(m, "Capture")
-        .def(nb::init<std::string>(), "path"_a,
-             R"doc(
-Capture command queues on this runtime's Metal device to a GPU trace document.
-
-Use as a context manager to stop the capture even if the body raises:
-``with metal_runtime.Capture("profile.gputrace"): ...``.
-)doc")
-        .def("__enter__", &PyCapture::enter, nb::rv_policy::reference_internal,
-             nb::sig("def __enter__(self) -> typing.Self"), "Start the capture and return self.")
-        .def(
-            "__exit__",
-            [](PyCapture& capture, nb::handle, nb::handle, nb::handle) { capture.exit(); },
-            nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
-            nb::sig("def __exit__(self, exc_type: type[BaseException] | None, exc_value: "
-                    "BaseException | None, traceback: types.TracebackType | None) -> None"),
-            "Stop the capture.");
 }
