@@ -13,9 +13,6 @@ __all__ = [
     "assemble",
 ]
 
-# What nearly every kernel includes.
-DEFAULT_INCLUDES: tuple[str, ...] = ("metal_stdlib",)
-
 
 @dataclasses.dataclass(frozen=True)
 class Fragment:
@@ -23,6 +20,10 @@ class Fragment:
 
     label: str
     text: str
+
+
+# What nearly every kernel includes: `assemble(DEFAULT_INCLUDES, body)`.
+DEFAULT_INCLUDES = Fragment("includes", "#include <metal_stdlib>")
 
 
 def _line_marker(label: str) -> str:
