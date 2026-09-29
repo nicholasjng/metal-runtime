@@ -1,8 +1,9 @@
+import contextlib
+from collections.abc import Iterator
+
 from metal_runtime._core import (
-    AllocationError,
     Batch,
     Buffer,
-    Capture,
     CaptureError,
     CompileError,
     DeviceError,
@@ -11,23 +12,17 @@ from metal_runtime._core import (
     Kernel,
     MathMode,
     PipelineBuildError,
-    PipelineCacheError,
     clear_library_cache,
     device_info,
     device_name,
     is_capturing,
     library_cache_limit,
     library_cache_size,
-    pipeline_cache_dir,
-    pipeline_cache_status,
     run,
-    save_pipeline_cache,
     set_library_cache_limit,
-    set_pipeline_cache_dir,
     start_capture,
     stop_capture,
     supported_dtypes,
-    supported_gpu_families,
 )
 from metal_runtime.source import (
     DEFAULT_INCLUDES,
@@ -38,7 +33,6 @@ from metal_runtime.source import (
 
 __all__ = [
     "DEFAULT_INCLUDES",
-    "AllocationError",
     "Batch",
     "Buffer",
     "Capture",
@@ -51,7 +45,6 @@ __all__ = [
     "Kernel",
     "MathMode",
     "PipelineBuildError",
-    "PipelineCacheError",
     "__version__",
     "assemble",
     "build_source",
@@ -61,16 +54,22 @@ __all__ = [
     "is_capturing",
     "library_cache_limit",
     "library_cache_size",
-    "pipeline_cache_dir",
-    "pipeline_cache_status",
     "run",
-    "save_pipeline_cache",
     "set_library_cache_limit",
-    "set_pipeline_cache_dir",
     "start_capture",
     "stop_capture",
     "supported_dtypes",
-    "supported_gpu_families",
 ]
 
 __version__ = "0.1.0"
+
+
+@contextlib.contextmanager
+def Capture(path: str) -> Iterator[None]:
+    """Capture dispatches on the runtime's Metal device to a GPU trace
+    document at `path`. The capture stops even if the body raises."""
+    start_capture(path)
+    try:
+        yield
+    finally:
+        stop_capture()

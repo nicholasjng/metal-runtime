@@ -46,9 +46,7 @@ kernel void nothing(device float* state [[buffer(0)]], uint tid [[thread_positio
 }
 """
 
-# A dependent FMA chain, so device time can be dialled up without touching memory.
-# The loop is a linear recurrence a compiler could in principle close out;
-# measured, it does not - device time scales with `iters`.
+# A dependent FMA chain: device time scales with `iters` without touching memory.
 _WORK_KERNEL = """
 #include <metal_stdlib>
 using namespace metal;
@@ -62,8 +60,7 @@ kernel void work(device float* out [[buffer(0)]], constant uint& iters [[buffer(
 """
 
 
-# Every binding is read: an unused one is optimized out and would skip the
-# reflection check that costs host time.
+# Every binding is read, so none is optimized out of the reflection check.
 def _multi_buffer_kernel(count: int) -> str:
     params = ", ".join(f"device float* b{i} [[buffer({i})]]" for i in range(count))
     body = " + ".join(f"b{i}[tid]" for i in range(count))
@@ -90,7 +87,6 @@ _UPLOAD = np.zeros(1 << 22, dtype=np.float32)  # 16 MiB
 _UNIQUE = itertools.count()  # cache-busting for the compile benchmarks
 
 _PHASES = ("create", "encode", "commit", "wait", "total")
-_SUBMIT_PARTS = ("driver", "queued", "gpu", "host_wake", "wall")
 _CALL_PHASES = ("inputs", "output_alloc", "dispatch", "readback", "total")
 
 
@@ -204,47 +200,6 @@ def bench_run_empty(state: mew.State) -> None:
     buffer = mr.Buffer.zeros([1])
     for _ in state:
         mr.run(kernel, grid=1, buffers=[buffer])
-
-
-@mew.parametrize(
-    [{"part": p} for p in _SUBMIT_PARTS],
-    ids=list(_SUBMIT_PARTS),
-    tags="dispatch",
-    use_manual_time=True,
-    unit="us",
-    min_warmup_time=0.1,
-)
-def bench_submit_path(state: mew.State, part: str) -> None:
-    """Commit-to-completion, split by the command buffer's own timestamps.
-
-    Only `gpu` is work; `queued` and `host_wake` are what a batched or
-    pipelined caller avoids.
-    """
-    kernel = mr.Kernel(_TINY_KERNEL, "step")
-    buffer = mr.Buffer.zeros([N])
-    for _ in state:
-        batch = mr.Batch()
-        batch.add(kernel, grid=N, buffers=[buffer])
-        t0 = clock()
-        batch.commit()
-        batch.wait()
-        wall = clock() - t0
-        stamps = batch.timestamps
-        if stamps is None:
-            state.skip_with_error("timestamps unavailable after wait()")
-            return
-        driver = stamps["kernel_end"] - stamps["kernel_start"]
-        queued = stamps["gpu_start"] - stamps["kernel_end"]
-        gpu = stamps["gpu_end"] - stamps["gpu_start"]
-        state.set_iteration_time(
-            {
-                "driver": driver,
-                "queued": queued,
-                "gpu": gpu,
-                "host_wake": max(wall - (driver + queued + gpu), 0.0),
-                "wall": wall,
-            }[part]
-        )
 
 
 @mew.benchmark(tags="dispatch", use_real_time=True, unit="us", min_warmup_time=0.1)

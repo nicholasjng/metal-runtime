@@ -101,13 +101,22 @@ kernel = mr.Kernel(source, "step", constants={"DECAY": 0.999, "N": n})
 Required constants must be set and unknown names raise, validated against
 the kernel's own reflection.
 
-**Errors.** `CompileError` (with `FunctionNotFoundError` as a subclass) for
-bad MSL or a missing entry point, `DispatchError` for a GPU-aborted command
-buffer, `DeviceError` when there is no Metal device.
+**Errors.** `CompileError` (with `FunctionNotFoundError` and
+`PipelineBuildError` as subclasses) for bad MSL, a missing entry point, or a
+failed pipeline build; `DispatchError` for a GPU-aborted command buffer;
+`DeviceError` when there is no Metal device; a plain `MemoryError` when
+Metal refuses an allocation.
 
 **Introspection.** `mr.device_info()` reports device limits; per-kernel
 limits are available on the `Kernel` object. Compiled libraries are cached
-by source text, bounded by `mr.set_library_cache_limit()`.
+by source text, bounded by `mr.set_library_cache_limit()`. There is no
+on-disk pipeline cache: macOS caches compiled pipelines across processes on
+its own, and a binary archive measured no faster.
+
+**C API.** `libmetal_runtime.dylib` ships in the package with `c_api.h`
+(see `metal_runtime.c_api.include_dir()` and `library_dir()`), so a host
+without Python or the GIL, such as an XLA FFI handler, can compile and
+dispatch through the same runtime the Python extension uses.
 
 `benchmarks/bench_overhead.py` measures the runtime's own overhead,
 separated from GPU execution via `gpu_time`.

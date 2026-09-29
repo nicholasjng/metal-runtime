@@ -55,11 +55,3 @@ extend-exclude = ["ext"]
 
 [tool.ty.src]
 include = ["src", "tests"]
-
-[[tool.ty.overrides]]
-# jax/mlx are stub-only annotations here (to_jax()/to_mlx()), not real deps of
-# this package; neither is installed, so their imports are unresolved by design.
-include = ["src/metal_runtime/_core.pyi"]
-
-[tool.ty.overrides.rules]
-unresolved-import = "ignore"

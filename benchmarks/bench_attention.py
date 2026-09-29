@@ -164,10 +164,8 @@ kernel void attention(device const float* Q [[buffer(0)]],
 """
 
 
-# A sweep, not a chosen value: blocking by n cuts K/V traffic by n but also
-# divides the SIMD-group count by n, and SEQ_LEN rows do not divide far. 8
-# measured fastest (2.0x device time over `rowwise`); 32 leaves 32 SIMD groups
-# for 16 GPU cores and is 6x slower than `rowwise`.
+# Blocking by n cuts K/V traffic by n but also divides the SIMD-group count
+# by n; 8 measured fastest, 32 is 6x slower than `rowwise`.
 BLOCK_SIZES = (2, 4, 8, 16, 32)
 
 _VARIANTS: dict[str, tuple[str, int]] = {

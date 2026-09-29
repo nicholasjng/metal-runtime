@@ -152,7 +152,6 @@ def test_buffer_exposes_shape_dtype_and_size():
     assert buffer.dtype == "float32"
     assert buffer.size == 12
     assert buffer.nbytes == 48
-    assert len(buffer) == 4
     assert repr(buffer) == "Buffer(shape=(4, 3), dtype='float32')"
 
 
@@ -508,108 +507,15 @@ def test_clear_library_cache(restore_cache_limit):
     assert mr.library_cache_size() == 0
 
 
-@pytest.fixture
-def restore_pipeline_cache_dir():
-    yield
-    mr.set_pipeline_cache_dir(None)
-
-
-def test_pipeline_cache_dir_defaults_to_off(restore_pipeline_cache_dir):
-    mr.set_pipeline_cache_dir(None)
-    assert mr.pipeline_cache_dir() is None
-
-
-def test_pipeline_cache_dir_reports_the_configured_path(
-    tmp_path, restore_pipeline_cache_dir
-):
-    path = str(tmp_path / "pipelines.bin")
-    mr.set_pipeline_cache_dir(path)
-    assert mr.pipeline_cache_dir() == path
-    mr.set_pipeline_cache_dir(None)
-    assert mr.pipeline_cache_dir() is None
-
-
-def test_pipeline_cache_dispatches_correctly_while_enabled(
-    tmp_path, restore_pipeline_cache_dir
-):
-    """Building against a live archive must not change dispatch behavior."""
-    mr.set_pipeline_cache_dir(str(tmp_path / "pipelines.bin"))
-    array = np.arange(8, dtype=np.float32)
-    buffer = mr.Buffer(array)
-    mr.run(mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=8, buffers=[buffer])
-    assert np.array_equal(buffer.to_numpy(), array + 1.0)
-
-
 def test_exception_hierarchy():
     assert issubclass(mr.FunctionNotFoundError, mr.CompileError)
     assert issubclass(mr.PipelineBuildError, mr.CompileError)
-    assert issubclass(mr.AllocationError, MemoryError)
-    assert issubclass(mr.PipelineCacheError, OSError)
 
 
-def test_impossible_allocation_raises_allocation_error():
-    # Far beyond any device's maxBufferLength; Metal refuses without
-    # actually trying to reserve the memory.
-    with pytest.raises(mr.AllocationError, match="failed to allocate"):
+def test_impossible_allocation_raises_memory_error():
+    # Beyond any device's maxBufferLength, so Metal refuses without trying.
+    with pytest.raises(MemoryError, match="failed to allocate"):
         mr.Buffer.empty([2**42])
-    # AllocationError is a MemoryError, so generic OOM handlers catch it.
-    with pytest.raises(MemoryError):
-        mr.Buffer.empty([2**42])
-
-
-def test_save_pipeline_cache_without_a_dir_raises(restore_pipeline_cache_dir):
-    mr.set_pipeline_cache_dir(None)
-    with pytest.raises(ValueError, match="no pipeline cache directory"):
-        mr.save_pipeline_cache()
-
-
-def test_save_pipeline_cache_to_an_unwritable_path_raises(
-    tmp_path, restore_pipeline_cache_dir
-):
-    # The parent directory does not exist, so serialization must fail.
-    mr.set_pipeline_cache_dir(str(tmp_path / "no_such_dir" / "pipelines.bin"))
-    with pytest.raises(mr.PipelineCacheError, match="failed to write pipeline cache"):
-        mr.save_pipeline_cache()
-    # PipelineCacheError is an I/O failure, so plain OSError handlers catch it.
-    with pytest.raises(OSError):
-        mr.save_pipeline_cache()
-
-
-def test_pipeline_cache_status_reports_dir_and_clean_staging(
-    tmp_path, restore_pipeline_cache_dir
-):
-    path = tmp_path / "pipelines.bin"
-    mr.set_pipeline_cache_dir(str(path))
-    status = mr.pipeline_cache_status()
-    assert status["dir"] == str(path)
-    assert status["add_failures"] == 0
-    assert status["last_error"] is None
-    mr.set_pipeline_cache_dir(None)
-    assert mr.pipeline_cache_status()["dir"] is None
-
-
-def test_save_pipeline_cache_writes_a_reusable_file(
-    tmp_path, restore_cache_limit, restore_pipeline_cache_dir
-):
-    path = tmp_path / "pipelines.bin"
-    mr.set_pipeline_cache_dir(str(path))
-    # A fresh build is required to stage anything into the archive.
-    mr.clear_library_cache()
-    mr.run(
-        mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=4, buffers=[mr.Buffer.zeros([4])]
-    )
-    mr.save_pipeline_cache()
-    assert path.exists()
-    assert path.stat().st_size > 0
-
-    # Forces a rebuild against the reloaded archive rather than an in-process hit.
-    mr.clear_library_cache()
-    mr.set_pipeline_cache_dir(None)
-    mr.set_pipeline_cache_dir(str(path))
-    array = np.arange(4, dtype=np.float32)
-    buffer = mr.Buffer(array)
-    mr.run(mr.Kernel(_ADD_ONE_SOURCE, "add_one"), grid=4, buffers=[buffer])
-    assert np.array_equal(buffer.to_numpy(), array + 1.0)
 
 
 def test_concurrent_compile_and_dispatch(restore_cache_limit):
@@ -1145,27 +1051,6 @@ def test_gpu_time_is_none_before_wait_and_positive_after():
     assert gpu_time is not None and gpu_time > 0.0
 
 
-def test_timestamps_are_none_before_wait_and_ordered_after():
-    buffer = mr.Buffer.zeros([64])
-    batch = mr.Batch()
-    batch.add(mr.Kernel(_FILL_TID_SOURCE, "fill_tid"), grid=64, buffers=[buffer])
-    assert batch.timestamps is None
-    batch.wait()
-
-    stamps = batch.timestamps
-    assert stamps is not None
-    assert set(stamps) == {"kernel_start", "kernel_end", "gpu_start", "gpu_end"}
-    # One epoch, and the command buffer moves through the driver before the
-    # GPU runs it -- which is what makes the differences meaningful.
-    assert (
-        stamps["kernel_start"]
-        <= stamps["kernel_end"]
-        <= stamps["gpu_start"]
-        <= stamps["gpu_end"]
-    )
-    assert batch.gpu_time == pytest.approx(stamps["gpu_end"] - stamps["gpu_start"])
-
-
 def test_repeated_launches_at_differing_shapes_all_validate():
     """The shape cache holds several entries, not just the most recent one.
 
@@ -1301,13 +1186,6 @@ def test_dlpack_export_round_trips():
     assert np.array_equal(arr, np.arange(4, dtype=np.float32) + 1.0)
 
 
-def test_len_of_a_zero_dim_buffer_raises_like_numpy():
-    buffer = mr.Buffer(np.array(1.0, dtype=np.float32))
-    assert buffer.shape == ()
-    with pytest.raises(TypeError, match="unsized"):
-        len(buffer)
-
-
 def test_device_info_reports_memory_limits():
     info = mr.device_info()
     assert info["max_threadgroup_memory_length"] > 0
@@ -1408,12 +1286,8 @@ def test_shared_batch_encodes_and_waits_from_multiple_threads():
     def wait_and_read(_):
         start.wait(timeout=10)
         for _ in range(20):
-            # Reads may race the first timestamp capture.
-            before = batch.timestamps
-            assert before is None or before["gpu_end"] >= before["gpu_start"]
             batch.wait()
             assert batch.gpu_time is not None
-            assert batch.timestamps is not None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(wait_and_read, range(8)))

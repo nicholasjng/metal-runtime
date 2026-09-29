@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 import metal_runtime as mr
-from metal_runtime import df32
 
 ADD_ONE_BODY = """\
 using namespace metal;
@@ -81,17 +80,3 @@ def test_compile_error_is_attributed_to_a_prelude_fragment():
     )
     with pytest.raises(mr.CompileError, match=r"helpers:1:"):
         mr.Kernel(src, "add_one")
-
-
-def test_df32_fragment_composes_as_prelude():
-    body = """\
-kernel void sum_pair(device float* out [[buffer(0)]]) {
-    df32 s = two_sum(0.5f, 0.25f);
-    out[0] = s.hi + s.lo;
-}
-"""
-    src = mr.build_source(preludes=(df32.FRAGMENT,), body=body)
-    kernel = mr.Kernel(src, "sum_pair", math_mode=mr.MathMode.SAFE)
-    out = mr.Buffer(np.zeros(1, dtype=np.float32))
-    mr.run(kernel, grid=(1, 1, 1), buffers=[out])
-    np.testing.assert_array_equal(out.to_numpy(), np.array([0.75], dtype=np.float32))
