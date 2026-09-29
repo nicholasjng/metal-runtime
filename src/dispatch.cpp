@@ -32,6 +32,110 @@ size_t rounded_threadgroup_length(size_t length) {
            kThreadgroupMemoryAlignment;
 }
 
+// Everything Metal would fault, abort, or silently misbehave on, checked on
+// the host. The order fixes which error a launch with several faults reports.
+void validate(const Launch& launch, bool non_uniform, size_t max_threadgroup_memory) {
+    const ComputePipeline* pipeline = launch.pipeline;
+    if (!pipeline) throw std::invalid_argument("dispatch: launch has no pipeline");
+
+    const Dim3 grid = launch.grid;
+    const Dim3 tg = launch.threadgroup;
+    if (!launch.indirect_grid && (grid.x == 0 || grid.y == 0 || grid.z == 0)) {
+        throw std::invalid_argument("dispatch: grid " + to_string(grid) +
+                                    " must be non-zero in every dimension");
+    }
+    if (tg.x == 0 || tg.y == 0 || tg.z == 0) {
+        throw std::invalid_argument("dispatch: threadgroup " + to_string(tg) +
+                                    " must be non-zero in every dimension");
+    }
+    size_t max_total = pipeline->max_threads_per_threadgroup();
+    if (tg.x > max_total || tg.y > max_total || tg.z > max_total || tg.volume() > max_total) {
+        throw std::invalid_argument("dispatch: threadgroup " + to_string(tg) + " has " +
+                                    std::to_string(tg.volume()) +
+                                    " threads, but this kernel supports at most " +
+                                    std::to_string(max_total) + " per threadgroup");
+    }
+
+    size_t binding_count = launch.buffers.size() + launch.scalars.size();
+    if (binding_count > 31) {
+        throw std::invalid_argument("dispatch: " + std::to_string(binding_count) +
+                                    " buffer bindings requested, but Metal allows at most 31");
+    }
+    // A used binding the launch doesn't cover reads unbound memory.
+    for (const BindingInfo& binding : pipeline->buffer_bindings()) {
+        if (binding.index >= binding_count) {
+            throw std::invalid_argument(
+                "dispatch: kernel '" + pipeline->label() + "' reads argument '" + binding.name +
+                "' at buffer index " + std::to_string(binding.index) + ", but only " +
+                std::to_string(binding_count) +
+                " bindings were provided (buffers bind first, scalars after)");
+        }
+    }
+    for (const BindingInfo& binding : pipeline->threadgroup_bindings()) {
+        if (binding.index >= launch.threadgroup_memory.size()) {
+            throw std::invalid_argument("dispatch: kernel '" + pipeline->label() +
+                                        "' uses threadgroup memory '" + binding.name +
+                                        "' at index " + std::to_string(binding.index) +
+                                        "; pass its byte size in threadgroup_memory");
+        }
+    }
+
+    // Static and dynamic threadgroup memory share one budget; exceeding it
+    // downstream is a process abort (Metal API validation), not an error.
+    size_t threadgroup_total = pipeline->static_threadgroup_memory_length();
+    for (size_t length : launch.threadgroup_memory) {
+        size_t rounded = rounded_threadgroup_length(length);
+        if (threadgroup_total > max_threadgroup_memory ||
+            rounded > max_threadgroup_memory - threadgroup_total) {
+            throw std::invalid_argument(
+                "dispatch: threadgroup memory exceeds this device's budget of " +
+                std::to_string(max_threadgroup_memory) + " bytes per threadgroup");
+        }
+        threadgroup_total += rounded;
+    }
+    if (threadgroup_total > max_threadgroup_memory) {
+        throw std::invalid_argument(
+            "dispatch: " + std::to_string(threadgroup_total) +
+            " bytes of threadgroup memory requested (including " +
+            std::to_string(pipeline->static_threadgroup_memory_length()) +
+            " bytes of static allocations in the kernel), but this device supports at most " +
+            std::to_string(max_threadgroup_memory) + " bytes per threadgroup");
+    }
+
+    for (const Launch::Scalar& scalar : launch.scalars) {
+        if (scalar.size > kMaxInlineScalarBytes) {
+            throw std::invalid_argument("dispatch: inline scalar of " +
+                                        std::to_string(scalar.size) + " bytes exceeds Metal's " +
+                                        std::to_string(kMaxInlineScalarBytes) +
+                                        "-byte setBytes limit; pass it as a Buffer instead");
+        }
+    }
+    for (size_t i = 0; i < launch.buffers.size(); ++i) {
+        const auto& [buffer, offset] = launch.buffers[i];
+        if (offset >= buffer->size() && !(offset == 0 && buffer->size() == 0)) {
+            throw std::invalid_argument(
+                "dispatch: buffers[" + std::to_string(i) + "] offset " + std::to_string(offset) +
+                " is out of bounds for a buffer of " + std::to_string(buffer->size()) + " bytes");
+        }
+    }
+
+    if (launch.indirect_grid) {
+        size_t size = launch.indirect_grid->size();
+        if (launch.indirect_offset % 4 != 0 || launch.indirect_offset > size ||
+            kIndirectArgumentsSize > size - launch.indirect_offset) {
+            throw std::invalid_argument(
+                "dispatch: indirect grid arguments need " + std::to_string(kIndirectArgumentsSize) +
+                " bytes at a 4-byte-aligned offset, but offset " +
+                std::to_string(launch.indirect_offset) + " into a buffer of " +
+                std::to_string(size) + " bytes doesn't provide that");
+        }
+    } else if (!non_uniform && (grid.x % tg.x || grid.y % tg.y || grid.z % tg.z)) {
+        throw std::invalid_argument(
+            "dispatch: this GPU does not support non-uniform threadgroups, so grid " +
+            to_string(grid) + " must divide evenly by threadgroup " + to_string(tg));
+    }
+}
+
 }  // namespace
 
 ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
@@ -67,86 +171,6 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
 }
 
 ComputePipeline::~ComputePipeline() = default;
-
-void ComputePipeline::validate_shape(size_t binding_count,
-                                     const std::vector<size_t>& threadgroup_memory, Dim3 tg,
-                                     size_t device_max_threadgroup_memory) {
-    {
-        std::lock_guard<std::mutex> lock(shape_cache_mutex_);
-        for (const LaunchShape& seen : validated_shapes_) {
-            if (seen.binding_count == binding_count &&
-                seen.device_max_threadgroup_memory == device_max_threadgroup_memory &&
-                seen.threadgroup == tg && seen.threadgroup_memory == threadgroup_memory) {
-                return;
-            }
-        }
-    }
-
-    if (tg.x == 0 || tg.y == 0 || tg.z == 0) {
-        throw std::invalid_argument("dispatch: threadgroup " + to_string(tg) +
-                                    " must be non-zero in every dimension");
-    }
-
-    size_t max_total = max_threads_per_threadgroup();
-    if (tg.x > max_total || tg.y > max_total || tg.z > max_total || tg.volume() > max_total) {
-        throw std::invalid_argument("dispatch: threadgroup " + to_string(tg) + " has " +
-                                    std::to_string(tg.volume()) +
-                                    " threads, but this kernel supports at most " +
-                                    std::to_string(max_total) + " per threadgroup");
-    }
-
-    if (binding_count > 31) {
-        throw std::invalid_argument("dispatch: " + std::to_string(binding_count) +
-                                    " buffer bindings requested, but Metal allows at most 31");
-    }
-
-    // A used binding the launch doesn't cover reads unbound memory.
-    for (const BindingInfo& binding : buffer_bindings_) {
-        if (binding.index >= binding_count) {
-            throw std::invalid_argument(
-                "dispatch: kernel '" + label_ + "' reads argument '" + binding.name +
-                "' at buffer index " + std::to_string(binding.index) + ", but only " +
-                std::to_string(binding_count) +
-                " bindings were provided (buffers bind first, scalars after)");
-        }
-    }
-    for (const BindingInfo& binding : threadgroup_bindings_) {
-        if (binding.index >= threadgroup_memory.size()) {
-            throw std::invalid_argument("dispatch: kernel '" + label_ +
-                                        "' uses threadgroup memory '" + binding.name +
-                                        "' at index " + std::to_string(binding.index) +
-                                        "; pass its byte size in threadgroup_memory");
-        }
-    }
-
-    // Static and dynamic threadgroup memory share one budget, exceeding it downstream
-    // is a process abort (Metal API validation), not an error.
-    size_t threadgroup_total = static_threadgroup_memory_length();
-    for (size_t length : threadgroup_memory) {
-        size_t rounded = rounded_threadgroup_length(length);
-        if (threadgroup_total > device_max_threadgroup_memory ||
-            rounded > device_max_threadgroup_memory - threadgroup_total) {
-            throw std::invalid_argument(
-                "dispatch: threadgroup memory exceeds this device's budget of " +
-                std::to_string(device_max_threadgroup_memory) + " bytes per threadgroup");
-        }
-        threadgroup_total += rounded;
-    }
-    if (threadgroup_total > device_max_threadgroup_memory) {
-        throw std::invalid_argument(
-            "dispatch: " + std::to_string(threadgroup_total) +
-            " bytes of threadgroup memory requested (including " +
-            std::to_string(static_threadgroup_memory_length()) +
-            " bytes of static allocations in the kernel), but this device supports at most " +
-            std::to_string(device_max_threadgroup_memory) + " bytes per threadgroup");
-    }
-
-    std::lock_guard<std::mutex> lock(shape_cache_mutex_);
-    if (validated_shapes_.size() < kMaxValidatedShapes) {
-        validated_shapes_.push_back(
-            LaunchShape{binding_count, device_max_threadgroup_memory, tg, threadgroup_memory});
-    }
-}
 
 Dim3 ComputePipeline::default_threadgroup(Dim3 grid) const {
     size_t max_total = std::max<size_t>(max_threads_per_threadgroup(), 1);
@@ -197,54 +221,7 @@ void CommandBatch::add(const Launch& launch) {
     if (committed_) {
         throw DispatchError("cannot add to a batch that has already been committed");
     }
-    if (!launch.pipeline) {
-        throw std::invalid_argument("dispatch: launch has no pipeline");
-    }
-
-    const Dim3 grid = launch.grid;
-    const Dim3 tg = launch.threadgroup;
-
-    if (!launch.indirect_grid && (grid.x == 0 || grid.y == 0 || grid.z == 0)) {
-        throw std::invalid_argument("dispatch: grid " + to_string(grid) +
-                                    " must be non-zero in every dimension");
-    }
-
-    size_t binding_count = launch.buffers.size() + launch.scalars.size();
-    launch.pipeline->validate_shape(binding_count, launch.threadgroup_memory, tg,
-                                    max_threadgroup_memory_);
-
-    for (const auto& scalar : launch.scalars) {
-        if (scalar.size > kMaxInlineScalarBytes) {
-            throw std::invalid_argument("dispatch: inline scalar of " +
-                                        std::to_string(scalar.size) + " bytes exceeds Metal's " +
-                                        std::to_string(kMaxInlineScalarBytes) +
-                                        "-byte setBytes limit; pass it as a Buffer instead");
-        }
-    }
-    for (size_t i = 0; i < launch.buffers.size(); ++i) {
-        const auto& [buffer, offset] = launch.buffers[i];
-        if (offset >= buffer->size() && !(offset == 0 && buffer->size() == 0)) {
-            throw std::invalid_argument(
-                "dispatch: buffers[" + std::to_string(i) + "] offset " + std::to_string(offset) +
-                " is out of bounds for a buffer of " + std::to_string(buffer->size()) + " bytes");
-        }
-    }
-
-    if (launch.indirect_grid) {
-        size_t size = launch.indirect_grid->size();
-        if (launch.indirect_offset % 4 != 0 || launch.indirect_offset > size ||
-            kIndirectArgumentsSize > size - launch.indirect_offset) {
-            throw std::invalid_argument(
-                "dispatch: indirect grid arguments need " + std::to_string(kIndirectArgumentsSize) +
-                " bytes at a 4-byte-aligned offset, but offset " +
-                std::to_string(launch.indirect_offset) + " into a buffer of " +
-                std::to_string(launch.indirect_grid->size()) + " bytes doesn't provide that");
-        }
-    } else if (!non_uniform_ && (grid.x % tg.x || grid.y % tg.y || grid.z % tg.z)) {
-        throw std::invalid_argument(
-            "dispatch: this GPU does not support non-uniform threadgroups, so grid " +
-            to_string(grid) + " must divide evenly by threadgroup " + to_string(tg));
-    }
+    validate(launch, non_uniform_, max_threadgroup_memory_);
 
     encoder_->setComputePipelineState(launch.pipeline->handle());
     NS::UInteger index = 0;
@@ -259,6 +236,8 @@ void CommandBatch::add(const Launch& launch) {
             rounded_threadgroup_length(launch.threadgroup_memory[i]), i);
     }
 
+    const Dim3 grid = launch.grid;
+    const Dim3 tg = launch.threadgroup;
     MTL::Size mtl_tg = MTL::Size::Make(tg.x, tg.y, tg.z);
     if (launch.indirect_grid) {
         encoder_->dispatchThreadgroups(launch.indirect_grid->handle(), launch.indirect_offset,
