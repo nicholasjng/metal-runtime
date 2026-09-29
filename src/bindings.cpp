@@ -364,7 +364,7 @@ class PyBatch {
                                           threadgroup_memory, indirect_offset);
         std::lock_guard<std::mutex> lock(keepalive_mutex_);
         batch_.add(prepared.launch);
-        // Pinned until wait(), once each however many launches use them.
+        // Pinned once each until wait().
         for (nb::object& obj : prepared.keepalive)
             keepalive_.try_emplace(obj.ptr(), std::move(obj));
     }
@@ -576,8 +576,7 @@ TypeError
 )doc")
         .def(
             "__dlpack__",
-            // max_version is advisory: a producer may return an unversioned capsule, and
-            // the consumer checks which kind it got.
+            // max_version is advisory: the spec allows an unversioned capsule.
             [](PyBuffer& b, nb::handle stream, nb::handle, nb::handle dl_device,
                std::optional<bool> copy) {
                 if (!stream.is_none()) {
