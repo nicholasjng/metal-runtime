@@ -10,6 +10,7 @@
 #include "buffer.h"
 #include "export.h"
 #include "library.h"
+#include "ns_ptr.h"
 
 namespace MTL {
 class Device;
@@ -46,14 +47,14 @@ struct BindingInfo {
 
 class MR_API ComputePipeline {
    public:
-    // Takes ownership of `function`. `label` is for error messages only.
+    // `label` is for error messages only.
     ComputePipeline(MTL::Device* device, MTL::Function* function, const std::string& label);
     ~ComputePipeline();
     ComputePipeline(ComputePipeline&&) = delete;
     ComputePipeline(const ComputePipeline&) = delete;
     ComputePipeline& operator=(const ComputePipeline&) = delete;
 
-    MTL::ComputePipelineState* handle() const { return pipeline_; }
+    MTL::ComputePipelineState* handle() const { return pipeline_.get(); }
     const std::string& label() const { return label_; }
 
     // This kernel's limits, which register pressure can push below the device's.
@@ -80,7 +81,7 @@ class MR_API ComputePipeline {
         std::vector<size_t> threadgroup_memory;
     };
 
-    MTL::ComputePipelineState* pipeline_ = nullptr;
+    NS::SharedPtr<MTL::ComputePipelineState> pipeline_;
     std::string label_;
     std::vector<BindingInfo> buffer_bindings_;
     std::vector<BindingInfo> threadgroup_bindings_;
@@ -141,8 +142,9 @@ class MR_API CommandBatch {
    private:
     void commit_locked();
 
-    MTL::CommandBuffer* command_buffer_ = nullptr;
-    MTL::ComputeCommandEncoder* encoder_ = nullptr;
+    // Declaration order: the encoder is released before its command buffer.
+    NS::SharedPtr<MTL::CommandBuffer> command_buffer_;
+    NS::SharedPtr<MTL::ComputeCommandEncoder> encoder_;
     mutable std::mutex state_mutex_;
     bool committed_ = false;
     bool waited_ = false;

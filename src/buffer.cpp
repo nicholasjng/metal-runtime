@@ -9,9 +9,11 @@
 
 #include "metal.h"
 
-Buffer::Buffer(MTL::Device* device, size_t size_bytes) : size_(size_bytes) {
-    // newBuffer(0) returns nullptr; empty buffers get one byte.
-    buffer_ = device->newBuffer(std::max<size_t>(size_bytes, 1), MTL::ResourceStorageModeShared);
+// newBuffer(0) returns nullptr; empty buffers get one byte.
+Buffer::Buffer(MTL::Device* device, size_t size_bytes)
+    : buffer_(NS::TransferPtr(
+          device->newBuffer(std::max<size_t>(size_bytes, 1), MTL::ResourceStorageModeShared))),
+      size_(size_bytes) {
     if (!buffer_) {
         throw AllocationError("failed to allocate Metal buffer of " + std::to_string(size_bytes) +
                               " bytes");
@@ -25,20 +27,15 @@ Buffer::Buffer(MTL::Device* device, void* external_ptr, size_t size_bytes) : siz
             "Buffer: external_ptr and size_bytes must both be a multiple of the page size (" +
             std::to_string(page_size) + " bytes) to wrap without copying");
     }
-    buffer_ = device->newBuffer(external_ptr, size_bytes, MTL::ResourceStorageModeShared, nullptr);
+    buffer_ = NS::TransferPtr(
+        device->newBuffer(external_ptr, size_bytes, MTL::ResourceStorageModeShared, nullptr));
     if (!buffer_) {
         throw AllocationError("failed to wrap external memory of " + std::to_string(size_bytes) +
                               " bytes as a Metal buffer");
     }
 }
 
-Buffer::~Buffer() {
-    if (buffer_) buffer_->release();
-}
-
-Buffer::Buffer(Buffer&& other) noexcept : buffer_(other.buffer_), size_(other.size_) {
-    other.buffer_ = nullptr;
-    other.size_ = 0;
-}
+Buffer::~Buffer() = default;
+Buffer::Buffer(Buffer&& other) noexcept = default;
 
 void* Buffer::contents() const { return buffer_->contents(); }

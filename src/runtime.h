@@ -8,6 +8,7 @@
 #include "export.h"
 #include "library.h"
 #include "lru.h"
+#include "ns_ptr.h"
 
 namespace MTL {
 class Device;
@@ -34,8 +35,8 @@ class MR_API MetalRuntime {
     MetalRuntime(const MetalRuntime&) = delete;
     MetalRuntime& operator=(const MetalRuntime&) = delete;
 
-    MTL::Device* device() const { return device_; }
-    MTL::CommandQueue* queue() const { return queue_; }
+    MTL::Device* device() const { return device_.get(); }
+    MTL::CommandQueue* queue() const { return queue_.get(); }
 
     std::string device_name() const;
     bool has_unified_memory() const;
@@ -65,8 +66,8 @@ class MR_API MetalRuntime {
     bool is_capturing() const;
 
    private:
-    MTL::Device* device_ = nullptr;
-    MTL::CommandQueue* queue_ = nullptr;
+    NS::SharedPtr<MTL::Device> device_;
+    NS::SharedPtr<MTL::CommandQueue> queue_;
     bool non_uniform_threadgroups_ = false;
     size_t max_threadgroup_memory_ = 0;
 

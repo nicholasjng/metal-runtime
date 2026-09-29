@@ -2,17 +2,14 @@
 
 #include "metal.h"
 
-MetalRuntime::MetalRuntime() {
-    device_ = MTL::CreateSystemDefaultDevice();
+MetalRuntime::MetalRuntime() : device_(NS::TransferPtr(MTL::CreateSystemDefaultDevice())) {
     if (!device_) {
         throw NoDeviceError(
             "no Metal device found: this runtime needs macOS with a "
             "Metal-capable GPU");
     }
-    queue_ = device_->newCommandQueue();
+    queue_ = NS::TransferPtr(device_->newCommandQueue());
     if (!queue_) {
-        device_->release();
-        device_ = nullptr;
         throw NoDeviceError("could not create a Metal command queue on this device");
     }
     non_uniform_threadgroups_ = device_->supportsFamily(MTL::GPUFamilyApple4) ||
@@ -20,10 +17,7 @@ MetalRuntime::MetalRuntime() {
     max_threadgroup_memory_ = (size_t)device_->maxThreadgroupMemoryLength();
 }
 
-MetalRuntime::~MetalRuntime() {
-    if (queue_) queue_->release();
-    if (device_) device_->release();
-}
+MetalRuntime::~MetalRuntime() = default;
 
 std::string MetalRuntime::device_name() const {
     AutoreleaseScope scope;
@@ -52,7 +46,7 @@ std::shared_ptr<Library> MetalRuntime::library_for(const std::string& msl_source
         if (auto hit = libraries_.find(key)) return hit;
     }
     // Compiled outside the lock.
-    auto library = std::make_shared<Library>(device_, msl_source, options);
+    auto library = std::make_shared<Library>(device_.get(), msl_source, options);
     std::lock_guard<std::mutex> lock(mutex_);
     return libraries_.insert(key, std::move(library));
 }
@@ -92,7 +86,7 @@ void MetalRuntime::start_capture(const std::string& path) {
 
     MTL::CaptureDescriptor* descriptor = MTL::CaptureDescriptor::alloc()->init()->autorelease();
     // A device capture includes queues owned by other bindings in the process.
-    descriptor->setCaptureObject(device_);
+    descriptor->setCaptureObject(device_.get());
     descriptor->setDestination(MTL::CaptureDestinationGPUTraceDocument);
     NS::String* output_path = NS::String::string(path.c_str(), NS::UTF8StringEncoding);
     descriptor->setOutputURL(NS::URL::fileURLWithPath(output_path));
