@@ -101,11 +101,12 @@ kernel = mr.Kernel(source, "step", constants={"DECAY": 0.999, "N": n})
 Required constants must be set and unknown names raise, validated against
 the kernel's own reflection.
 
-**Errors.** `CompileError` (with `FunctionNotFoundError` and
-`PipelineBuildError` as subclasses) for bad MSL, a missing entry point, or a
-failed pipeline build; `DispatchError` for a GPU-aborted command buffer;
-`DeviceError` when there is no Metal device; a plain `MemoryError` when
-Metal refuses an allocation.
+**Errors.** All derive from `MetalError`. `CompileError` (with
+`FunctionNotFoundError` and `PipelineBuildError` as subclasses) for bad MSL, a
+missing entry point, or a failed pipeline build; `DispatchError` for a
+GPU-aborted command buffer; `DeviceError` when there is no Metal device;
+`CaptureError` for a failed trace capture. Bad arguments raise `ValueError`
+and a refused allocation raises `MemoryError`, as elsewhere in Python.
 
 **Introspection.** `mr.device_info()` reports device limits; per-kernel
 limits are available on the `Kernel` object. Compiled libraries are cached

@@ -128,6 +128,26 @@ def test_function_not_found_is_catchable_as_compile_error():
         mr.Kernel(_ADD_ONE_SOURCE, "no_such_kernel")
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        mr.DeviceError,
+        mr.CompileError,
+        mr.FunctionNotFoundError,
+        mr.PipelineBuildError,
+        mr.DispatchError,
+        mr.CaptureError,
+    ],
+)
+def test_every_runtime_error_is_a_metal_error(error):
+    assert issubclass(error, mr.MetalError)
+
+
+def test_metal_error_catches_a_compile_error():
+    with pytest.raises(mr.MetalError, match="MSL compile error"):
+        mr.Kernel("this is not valid msl {{{", "nope")
+
+
 def test_library_cache_reuses_compiled_kernel():
     """Same MSL source string, two Kernel objects: dispatching both should still
     work (exercises MetalRuntime's library cache without asserting object identity,
