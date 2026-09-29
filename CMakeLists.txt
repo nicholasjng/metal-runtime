@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(metal_runtime LANGUAGES CXX)
 
-# Everything below links Foundation/Metal/QuartzCore. Without this the failure
-# is a screenful of unresolved Objective-C symbols at link time rather than a
-# statement of the actual requirement.
 if(NOT APPLE)
   message(FATAL_ERROR
     "metal-runtime targets Apple platforms only: it builds against Metal, "
@@ -13,9 +10,8 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Generate a compilation database for each build tree. Developer builds can
-# copy theirs to the repository root without letting isolated package builds
-# replace it with paths from a temporary environment.
+# Developer builds copy their compilation database to the repository root;
+# isolated package builds must not.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 option(METAL_RUNTIME_SYNC_COMPILE_COMMANDS
   "Copy compile_commands.json to the source root" OFF)
@@ -30,9 +26,7 @@ if(PROJECT_IS_TOP_LEVEL AND METAL_RUNTIME_SYNC_COMPILE_COMMANDS)
     VERBATIM)
 endif()
 
-# Apple's official metal-cpp, fetched at configure time. Header-only:
-# Foundation / Metal / QuartzCore, no MPS. Bump the version by changing the URL.
-# The archive nests under metal-cpp/ on some releases, so handle either layout.
+# Apple's metal-cpp, header-only. Some releases nest under metal-cpp/.
 include(FetchContent)
 FetchContent_Declare(
   metalcpp
@@ -45,40 +39,33 @@ else()
   set(METAL_CPP_INCLUDE "${metalcpp_SOURCE_DIR}/metal-cpp")
 endif()
 
-# metal-cpp is header-only; the implementation is generated in exactly one TU
-# via the NS_/MTL_/CA_PRIVATE_IMPLEMENTATION macros (see src/metal.cpp).
 add_library(metal-cpp INTERFACE)
 target_include_directories(metal-cpp INTERFACE "${METAL_CPP_INCLUDE}")
+target_compile_definitions(metal-cpp INTERFACE METALCPP_SYMBOL_VISIBILITY_HIDDEN)
 target_link_libraries(metal-cpp INTERFACE
   "-framework Foundation" "-framework Metal" "-framework QuartzCore")
 
-add_library(metal_runtime STATIC
+# One shared library: runtime, metal-cpp implementation, and the C API. The
+# Python extension links against it, so a process hosting both (e.g. an XLA
+# FFI handler) has one device, one queue, one cache. Ships in the wheel.
+add_library(metal_runtime SHARED
   src/runtime.cpp
   src/metal.cpp
   src/buffer.cpp
   src/dtype.cpp
   src/library.cpp
-  src/dispatch.cpp)
+  src/dispatch.cpp
+  src/c_api.cpp)
 target_include_directories(metal_runtime PUBLIC src)   # so #include "runtime.h" resolves
-target_link_libraries(metal_runtime PUBLIC metal-cpp)
-# Linked into the _core shared module. Clang defaults to PIC on Darwin, so this
-# is belt-and-braces, but it keeps the requirement stated rather than inherited.
-set_target_properties(metal_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-# extern "C" entry point into dispatch, for callers without Python/the GIL
-# (e.g. an XLA FFI handler). No nanobind dependency, builds unconditionally.
-# Installed inside the metal_runtime package directory so it ships in the
-# wheel; see src/metal_runtime/c_api.py's include_dir()/library_dir().
-add_library(metal_runtime_c SHARED src/c_api.cpp)
-target_link_libraries(metal_runtime_c PRIVATE metal_runtime)
-set_target_properties(metal_runtime_c PROPERTIES SOVERSION 1 VERSION 1.0.0)
-install(TARGETS metal_runtime_c LIBRARY DESTINATION metal_runtime)
+target_link_libraries(metal_runtime PRIVATE metal-cpp)
+set_target_properties(metal_runtime PROPERTIES
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
+  INSTALL_NAME_DIR "@rpath")
+install(TARGETS metal_runtime LIBRARY DESTINATION metal_runtime)
 install(FILES src/c_api.h DESTINATION metal_runtime/include)
 
-# A plain `cmake -S . -B build` (system Python, no nanobind installed) should
-# still configure and build metal_runtime. Only scikit-build-core's build,
-# pointed at the project .venv where nanobind is a build dependency, needs the
-# `_core` extension target.
+# A plain `cmake -S . -B build` without nanobind still builds metal_runtime.
 find_package(Python 3.11 COMPONENTS Interpreter Development.Module)
 
 set(METAL_RUNTIME_HAVE_NANOBIND FALSE)
@@ -106,10 +93,10 @@ if(METAL_RUNTIME_HAVE_NANOBIND)
     src/bindings.cpp
   )
   target_link_libraries(_core PRIVATE metal_runtime)
+  set_target_properties(_core PROPERTIES INSTALL_RPATH "@loader_path")
 
   install(TARGETS _core LIBRARY DESTINATION metal_runtime)
 
-  # Generate in the build tree; explicit targets update or verify the source stub.
   set(_METAL_RUNTIME_CORE_STUB "${CMAKE_CURRENT_BINARY_DIR}/_core.pyi")
   nanobind_add_stub(
     _core_stub

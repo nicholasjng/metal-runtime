@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <string>
 
-// Element type of a Buffer, encoded as DLPack's (code, bits) pair for nb::ndarray compat.
+#include "export.h"
+
+// Element type of a Buffer, as DLPack's (code, bits).
 struct DType {
     enum Code : uint8_t { Int = 0, UInt = 1, Float = 2, Bfloat = 4, Bool = 6 };
 
@@ -15,12 +17,11 @@ struct DType {
     bool operator!=(const DType& other) const { return !(*this == other); }
 };
 
-// Every element type an MSL kernel can address.
-// Throws std::invalid_argument, naming the supported set, for anything else.
-DType dtype_from_name(const std::string& name);
+// Throws std::invalid_argument for an unsupported name.
+MR_API DType dtype_from_name(const std::string& name);
 
 // nullptr if `dt` isn't a dtype this runtime supports.
-const char* dtype_name(DType dt);
+MR_API const char* dtype_name(DType dt);
 
-// Comma-separated list of names of supported dtypes, for error messages.
-std::string supported_dtype_names();
+// Comma-separated, for error messages.
+MR_API std::string supported_dtype_names();
