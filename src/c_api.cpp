@@ -293,3 +293,26 @@ MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg) {
 }
 
 void mr_release_batch(MRBatch* batch) { delete batch; }
+
+MRStatus mr_batch_create(MRBatch** out_batch, char** out_err_msg) {
+    if (out_batch) *out_batch = nullptr;
+    return mr_guard(out_err_msg, [&] {
+        if (!out_batch) throw std::invalid_argument("mr_batch_create: out_batch is null");
+        *out_batch = new MRBatch(runtime());
+    });
+}
+
+MRStatus mr_batch_add(MRBatch* batch, const MRLaunchDesc* launch_desc, char** out_err_msg) {
+    return mr_guard(out_err_msg, [&] {
+        if (!batch) throw std::invalid_argument("mr_batch_add: batch is null");
+        Launch launch = build_launch(launch_desc, "mr_batch_add");
+        batch->batch.add(launch);
+    });
+}
+
+MRStatus mr_batch_commit(MRBatch* batch, char** out_err_msg) {
+    return mr_guard(out_err_msg, [&] {
+        if (!batch) throw std::invalid_argument("mr_batch_commit: batch is null");
+        batch->batch.commit();
+    });
+}

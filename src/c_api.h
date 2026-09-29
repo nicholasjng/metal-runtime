@@ -97,6 +97,12 @@ MR_EXPORT MRStatus mr_dispatch_async(const MRLaunchDesc* launch, MRBatch** out_b
 // Blocks until the batch completes; a faulted command buffer is MR_ERROR_DISPATCH.
 MR_EXPORT MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg);
 
+// Several launches in one command buffer: create, add each launch (the
+// descriptor is copied, so its arrays may change afterwards), commit, wait.
+MR_EXPORT MRStatus mr_batch_create(MRBatch** out_batch, char** out_err_msg);
+MR_EXPORT MRStatus mr_batch_add(MRBatch* batch, const MRLaunchDesc* launch, char** out_err_msg);
+MR_EXPORT MRStatus mr_batch_commit(MRBatch* batch, char** out_err_msg);
+
 MR_EXPORT void mr_release_batch(MRBatch* batch);
 
 #ifdef __cplusplus
