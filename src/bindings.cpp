@@ -16,7 +16,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -40,7 +40,7 @@ using Extent = std::variant<size_t, std::vector<size_t>>;
 class PyBuffer;
 
 // Host extents, or a Buffer of three uint32 threadgroup counts (indirect).
-using GridArg = std::variant<size_t, std::vector<size_t>, PyBuffer*>;
+using GridArg = std::variant<Extent, PyBuffer*>;
 
 // A buffer binding, optionally at a byte offset.
 using BufferArg = std::variant<PyBuffer*, std::pair<PyBuffer*, size_t>>;
@@ -138,7 +138,7 @@ class PyBuffer {
     explicit PyBuffer(HostArray array, const std::optional<std::string>& dtype)
         : PyBuffer(std::vector<size_t>(array.shape_ptr(), array.shape_ptr() + array.ndim()),
                    resolve_dtype(array, dtype), /*zero_fill=*/false) {
-        std::memcpy(buffer_->contents(), array.data(), array.nbytes());
+        std::memcpy(buffer_.contents(), array.data(), array.nbytes());
     }
 
     static PyBuffer zeros(std::vector<size_t> shape, const std::string& dtype) {
@@ -164,7 +164,7 @@ class PyBuffer {
                                         std::to_string(nbytes()) +
                                         "; copy_from cannot resize an allocation");
         }
-        std::memcpy(buffer_->contents(), array.data(), array.nbytes());
+        std::memcpy(buffer_.contents(), array.data(), array.nbytes());
     }
 
     nb::ndarray<nb::numpy> to_numpy(const std::optional<std::string>& dtype) const {
@@ -183,31 +183,29 @@ class PyBuffer {
                 "to_numpy(): NumPy has no native bfloat16 dtype. Read the bytes back with "
                 "to_numpy(dtype='uint16'), which ml_dtypes can .view() as bfloat16.");
         }
-        return nb::ndarray<nb::numpy>(buffer_->contents(), shape_.size(), shape_.data(),
+        return nb::ndarray<nb::numpy>(buffer_.contents(), shape_.size(), shape_.data(),
                                       nb::find(*this), nullptr, to_dlpack(out));
     }
 
     // A raw capsule skips NumPy's dtype table, so bfloat16 exports too.
     nb::ndarray<> to_dlpack_ndarray() const {
-        return nb::ndarray<>(buffer_->contents(), shape_.size(), shape_.data(), nb::find(*this),
+        return nb::ndarray<>(buffer_.contents(), shape_.size(), shape_.data(), nb::find(*this),
                              nullptr, to_dlpack(dtype_));
     }
 
-    Buffer* buffer() { return buffer_.get(); }
+    Buffer* buffer() { return &buffer_; }
 
     const std::vector<size_t>& shape() const { return shape_; }
     const char* dtype() const { return dtype_name(dtype_); }
-    size_t size() const { return size_; }
-    size_t nbytes() const { return nbytes_; }
+    size_t size() const { return nbytes() / dtype_.itemsize(); }
+    size_t nbytes() const { return buffer_.size(); }
 
    private:
     PyBuffer(std::vector<size_t> shape, DType dtype, bool zero_fill)
         : shape_(std::move(shape)),
           dtype_(dtype),
-          size_(checked_element_count(shape_)),
-          nbytes_(checked_byte_count(size_, dtype_)),
-          buffer_(std::make_unique<Buffer>(runtime().device(), nbytes_)) {
-        if (zero_fill) std::memset(buffer_->contents(), 0, nbytes_);
+          buffer_(runtime().device(), checked_byte_count(checked_element_count(shape_), dtype_)) {
+        if (zero_fill) std::memset(buffer_.contents(), 0, nbytes());
     }
 
     static size_t checked_byte_count(size_t count, DType dtype) {
@@ -219,9 +217,7 @@ class PyBuffer {
 
     std::vector<size_t> shape_;
     DType dtype_;
-    size_t size_;
-    size_t nbytes_;
-    std::unique_ptr<Buffer> buffer_;
+    Buffer buffer_;
 };
 
 // Python scalars coerce to the declared MSL type; a numpy scalar must match it exactly.
@@ -310,7 +306,6 @@ PreparedLaunch prepare(PyKernel& kernel, const GridArg& grid,
     prepared.keepalive.push_back(nb::find(kernel));
 
     if (PyBuffer* const* indirect = std::get_if<PyBuffer*>(&grid)) {
-        if (!*indirect) throw std::invalid_argument("grid is None");
         if (!threadgroup) {
             throw std::invalid_argument(
                 "an indirect grid needs an explicit threadgroup size: the buffer holds "
@@ -325,11 +320,7 @@ PreparedLaunch prepare(PyKernel& kernel, const GridArg& grid,
             throw std::invalid_argument(
                 "indirect_offset is only meaningful when grid is a Buffer of threadgroup counts");
         }
-        if (const size_t* n = std::get_if<size_t>(&grid)) {
-            prepared.launch.grid = to_dim3(*n, "grid");
-        } else {
-            prepared.launch.grid = to_dim3(std::get<std::vector<size_t>>(grid), "grid");
-        }
+        prepared.launch.grid = to_dim3(std::get<Extent>(grid), "grid");
         prepared.launch.threadgroup =
             threadgroup ? to_dim3(*threadgroup, "threadgroup")
                         : kernel.pipeline().default_threadgroup(prepared.launch.grid);
@@ -371,8 +362,7 @@ void run(PyKernel& kernel, const GridArg& grid, const std::optional<Extent>& thr
 
 class PyBatch {
    public:
-    explicit PyBatch(bool concurrent)
-        : batch_(std::make_unique<CommandBatch>(runtime(), concurrent)) {}
+    explicit PyBatch(bool concurrent) : batch_(runtime(), concurrent) {}
 
     void add(PyKernel& kernel, const GridArg& grid, const std::optional<Extent>& threadgroup,
              const std::vector<BufferArg>& buffers, std::vector<HostArray> scalars,
@@ -380,41 +370,38 @@ class PyBatch {
         PreparedLaunch prepared = prepare(kernel, grid, threadgroup, buffers, std::move(scalars),
                                           threadgroup_memory, indirect_offset);
         std::lock_guard<std::mutex> lock(keepalive_mutex_);
-        batch_->add(prepared.launch);
-        // Pinned until wait(); deduplicated for stepping loops.
-        for (nb::object& obj : prepared.keepalive) {
-            if (pinned_.insert(obj.ptr()).second) keepalive_.push_back(std::move(obj));
-        }
+        batch_.add(prepared.launch);
+        // Pinned until wait(), once each however many launches use them.
+        for (nb::object& obj : prepared.keepalive)
+            keepalive_.try_emplace(obj.ptr(), std::move(obj));
     }
 
-    void barrier() { batch_->barrier(); }
+    void barrier() { batch_.barrier(); }
 
     void commit() {
         nb::gil_scoped_release release;
-        batch_->commit();
+        batch_.commit();
     }
 
     void wait() {
         {
             nb::gil_scoped_release release;
-            batch_->wait();
+            batch_.wait();
         }
         // Decref outside the lock: finalizers may re-enter this batch.
-        std::vector<nb::object> released;
+        std::unordered_map<PyObject*, nb::object> released;
         {
             std::lock_guard<std::mutex> lock(keepalive_mutex_);
             released.swap(keepalive_);
-            pinned_.clear();
         }
     }
 
-    std::optional<double> gpu_time() const { return batch_->gpu_time(); }
+    std::optional<double> gpu_time() const { return batch_.gpu_time(); }
 
    private:
-    std::unique_ptr<CommandBatch> batch_;
+    CommandBatch batch_;
     std::mutex keepalive_mutex_;
-    std::vector<nb::object> keepalive_;
-    std::unordered_set<PyObject*> pinned_;
+    std::unordered_map<PyObject*, nb::object> keepalive_;
 };
 
 #define METAL_RUNTIME_LAUNCH_PARAMS                           \
@@ -630,79 +617,48 @@ TypeError
 )doc")
         .def(
             "__dlpack__",
-            [](PyBuffer& b, nb::kwargs kwargs) {
-                for (auto [key, value] : kwargs) {
-                    const std::string name = nb::cast<std::string>(key);
-                    if (name == "copy") {
-                        if (!value.is_none() && !nb::isinstance<nb::bool_>(value)) {
-                            throw nb::type_error(
-                                "Buffer.__dlpack__(copy=...) expects bool or None");
-                        }
-                        if (!value.is_none() && nb::cast<bool>(value)) {
-                            throw nb::type_error(
-                                "Buffer.__dlpack__(copy=True) is unsupported; use "
-                                "Buffer.to_numpy() "
-                                "and copy the returned array");
-                        }
-                    } else if (name == "stream") {
-                        if (!value.is_none()) {
-                            throw nb::type_error(
-                                "Buffer.__dlpack__ only supports stream=None for CPU-accessible "
-                                "Metal shared memory");
-                        }
-                    } else if (name == "dl_device") {
-                        std::pair<int, int> device{1, 0};
-                        if (!value.is_none() && !nb::try_cast(value, device)) {
-                            throw nb::type_error(
-                                "Buffer.__dlpack__(dl_device=...) expects a tuple");
-                        }
-                        if (device != std::pair<int, int>{1, 0}) {
-                            throw nb::type_error(
-                                "Buffer.__dlpack__ only supports dl_device=(1, 0) (CPU)");
-                        }
-                    } else if (name == "max_version") {
-                        if (!value.is_none()) {
-                            throw nb::type_error(
-                                "Buffer.__dlpack__ does not support versioned DLPack capsules");
-                        }
-                    } else {
-                        const std::string message =
-                            "Buffer.__dlpack__ got unsupported keyword '" + name + "'";
-                        throw nb::type_error(message.c_str());
-                    }
+            // max_version is advisory: a producer may return an unversioned capsule, and
+            // the consumer checks which kind it got.
+            [](PyBuffer& b, nb::handle stream, nb::handle, nb::handle dl_device,
+               std::optional<bool> copy) {
+                if (!stream.is_none()) {
+                    throw nb::type_error(
+                        "Buffer.__dlpack__ only supports stream=None for CPU-accessible Metal "
+                        "shared memory");
+                }
+                std::pair<int, int> device{1, 0};
+                if (!dl_device.is_none() &&
+                    (!nb::try_cast(dl_device, device) || device != std::pair<int, int>{1, 0})) {
+                    throw nb::type_error("Buffer.__dlpack__ only supports dl_device=(1, 0) (CPU)");
+                }
+                if (copy.value_or(false)) {
+                    throw nb::type_error(
+                        "Buffer.__dlpack__(copy=True) is unsupported; use Buffer.to_numpy() and "
+                        "copy the returned array");
                 }
                 return b.to_dlpack_ndarray();
             },
-            nb::sig("def __dlpack__(self, **kwargs) -> typing.Any"),
-            "DLPack capsule for this buffer's memory. Zero-copy. Supports copy=None/False, "
-            "stream=None, dl_device=(1, 0), and max_version=None. Unsupported protocol "
-            "options are rejected instead of ignored.")
+            nb::kw_only(), nb::arg("stream").none() = nb::none(),
+            nb::arg("max_version").none() = nb::none(), nb::arg("dl_device").none() = nb::none(),
+            nb::arg("copy").none() = nb::none(),
+            nb::sig("def __dlpack__(self, *, stream: None = None, max_version: tuple[int, int] | "
+                    "None = None, dl_device: tuple[int, int] | None = None, copy: bool | None = "
+                    "None) -> typing.Any"),
+            "DLPack capsule for this buffer's memory. Zero-copy and unversioned; only CPU "
+            "export (stream=None, dl_device=(1, 0)) without a copy is supported.")
         .def(
             "__dlpack_device__", [](PyBuffer&) { return nb::make_tuple(1, 0); },
             "DLPack device tuple: (kDLCPU, 0), since Metal's shared storage is "
             "host-addressable.")
         .def_prop_ro(
-            "shape",
-            [](const PyBuffer& b) {
-                nb::list dims;
-                for (size_t d : b.shape()) dims.append(d);
-                return nb::tuple(dims);
-            },
+            "shape", [](const PyBuffer& b) { return nb::tuple(nb::cast(b.shape())); },
             "Array shape.")
         .def_prop_ro("dtype", &PyBuffer::dtype, "dtype name, e.g. 'float32'.")
         .def_prop_ro("size", &PyBuffer::size, "Element count.")
         .def_prop_ro("nbytes", &PyBuffer::nbytes, "Byte count.")
         .def("__repr__", [](const PyBuffer& b) {
-            std::string out = "Buffer(shape=(";
-            for (size_t i = 0; i < b.shape().size(); ++i) {
-                if (i) out += ", ";
-                out += std::to_string(b.shape()[i]);
-            }
-            if (b.shape().size() == 1) out += ",";
-            out += "), dtype='";
-            out += b.dtype();
-            out += "')";
-            return out;
+            nb::str shape = nb::repr(nb::tuple(nb::cast(b.shape())));
+            return "Buffer(shape=" + std::string(shape.c_str()) + ", dtype='" + b.dtype() + "')";
         });
 
     nb::enum_<MathMode>(m, "MathMode", nb::is_str(),

@@ -189,9 +189,16 @@ class Buffer:
             dtype is bfloat16, which NumPy has no native dtype for.
         """
 
-    def __dlpack__(self, **kwargs) -> Any:
+    def __dlpack__(
+        self,
+        *,
+        stream: None = None,
+        max_version: tuple[int, int] | None = None,
+        dl_device: tuple[int, int] | None = None,
+        copy: bool | None = None,
+    ) -> Any:
         """
-        DLPack capsule for this buffer's memory. Zero-copy. Supports copy=None/False, stream=None, dl_device=(1, 0), and max_version=None. Unsupported protocol options are rejected instead of ignored.
+        DLPack capsule for this buffer's memory. Zero-copy and unversioned; only CPU export (stream=None, dl_device=(1, 0)) without a copy is supported.
         """
 
     def __dlpack_device__(self) -> tuple:
