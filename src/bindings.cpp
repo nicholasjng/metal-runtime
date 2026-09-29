@@ -351,7 +351,7 @@ PreparedLaunch prepare(PyKernel& kernel, const GridArg& grid,
             offset = o;
         }
         if (!buffer) throw std::invalid_argument("buffers contains None");
-        prepared.launch.buffers.emplace_back(buffer->buffer(), offset);
+        prepared.launch.buffers.push_back({buffer->buffer(), offset});
         prepared.keepalive.push_back(nb::find(*buffer));
     }
 
@@ -359,7 +359,7 @@ PreparedLaunch prepare(PyKernel& kernel, const GridArg& grid,
     for (size_t i = 0; i < prepared.scalars.size(); ++i) {
         const HostArray& scalar = prepared.scalars[i];
         check_scalar_dtype(scalar, i);
-        prepared.launch.scalars.emplace_back(scalar.data(), scalar.nbytes());
+        prepared.launch.scalars.push_back({scalar.data(), scalar.nbytes()});
     }
     return prepared;
 }

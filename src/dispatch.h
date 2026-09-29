@@ -4,7 +4,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "buffer.h"
@@ -100,9 +99,18 @@ class MR_API ComputePipeline {
 // the indices after. With indirect_grid set, grid is ignored and the GPU reads
 // three uint32 threadgroup counts from that buffer at indirect_offset.
 struct Launch {
+    struct BufferBinding {
+        Buffer* buffer;
+        size_t offset;  // bytes
+    };
+    struct Scalar {
+        const void* data;
+        size_t size;
+    };
+
     ComputePipeline* pipeline = nullptr;
-    std::vector<std::pair<Buffer*, size_t>> buffers;  // (buffer, byte offset)
-    std::vector<std::pair<const void*, size_t>> scalars;
+    std::vector<BufferBinding> buffers;
+    std::vector<Scalar> scalars;
     std::vector<size_t> threadgroup_memory;
     Dim3 grid;
     Dim3 threadgroup;
@@ -147,7 +155,6 @@ class MR_API CommandBatch {
     NS::SharedPtr<MTL::ComputeCommandEncoder> encoder_;
     mutable std::mutex state_mutex_;
     bool committed_ = false;
-    bool waited_ = false;
     bool non_uniform_ = false;
     size_t max_threadgroup_memory_ = 0;
     std::optional<double> gpu_time_;
