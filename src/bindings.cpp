@@ -24,6 +24,7 @@
 #include "buffer.h"
 #include "dispatch.h"
 #include "dtype.h"
+#include "errors.h"
 #include "library.h"
 #include "runtime.h"
 
@@ -430,16 +431,10 @@ nb::dict device_info() {
 }  // namespace
 
 NB_MODULE(_core, m) {
-    // Python-only: the common base, so callers can catch every runtime error at once.
-    // Qualified by the module's own name, as nb::exception does for the rest.
-    const std::string metal_error_name = nb::cast<std::string>(m.attr("__name__")) + ".MetalError";
-    nb::object metal_error = nb::steal(PyErr_NewExceptionWithDoc(
-        metal_error_name.c_str(), "Base class of every metal_runtime error.", PyExc_Exception,
-        nullptr));
-    m.attr("MetalError") = metal_error;
-
     // nanobind tries translators most-recent-first, so a derived exception
     // must be registered after its base.
+    nb::object metal_error = nb::exception<MetalError>(m, "MetalError");
+    metal_error.attr("__doc__") = "Base class of every metal_runtime error.";
     nb::exception<NoDeviceError>(m, "DeviceError", metal_error);
     nb::object compile_error = nb::exception<MSLCompileError>(m, "CompileError", metal_error);
     nb::exception<MSLFunctionNotFoundError>(m, "FunctionNotFoundError", compile_error);

@@ -2,7 +2,6 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 
 #include "export.h"
@@ -14,16 +13,6 @@ namespace MTL {
 class Device;
 class CommandQueue;
 }  // namespace MTL
-
-// No Metal device on this machine, or no command queue on it.
-struct MR_API NoDeviceError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
-
-// Starting or stopping a GPU trace capture failed.
-struct MR_API CaptureError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
 
 inline constexpr size_t kDefaultLibraryCacheLimit = 256;
 

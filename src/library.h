@@ -4,7 +4,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
@@ -47,15 +46,6 @@ struct FunctionConstant {
     std::variant<bool, int64_t, double, ExactScalar> value;
 };
 using FunctionConstants = std::vector<FunctionConstant>;
-
-struct MR_API MSLCompileError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
-
-// The source compiled but has no such entry point.
-struct MR_API MSLFunctionNotFoundError : MSLCompileError {
-    using MSLCompileError::MSLCompileError;
-};
 
 // MSL source compiled at runtime via newLibrary.
 class MR_API Library {
