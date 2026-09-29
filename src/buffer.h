@@ -2,28 +2,25 @@
 #include <cstddef>
 #include <stdexcept>
 
+#include "export.h"
+
 namespace MTL {
 class Device;
 class Buffer;
 }  // namespace MTL
 
-// Metal refused to allocate or wrap buffer memory (typically device memory
-// exhaustion or a request beyond maxBufferLength). Registered in Python
-// under MemoryError, so `except MemoryError` catches GPU and host OOM alike.
-struct AllocationError : std::runtime_error {
+// Metal refused to allocate or wrap memory. MemoryError in Python.
+struct MR_API AllocationError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// Unified memory, so host and GPU read/write the same bytes.
-// This makes contents() a plain pointer, no upload/readback copy needed.
-class Buffer {
+// Shared storage: host and GPU read and write the same bytes.
+class MR_API Buffer {
    public:
     Buffer(MTL::Device* device, size_t size_bytes);
 
-    // Wraps caller-owned memory with no copy. external_ptr must stay valid
-    // and unmoved for this Buffer's lifetime; the caller keeps ownership and
-    // frees it only after this Buffer is destroyed. Requires page-aligned
-    // external_ptr/size_bytes; throws std::invalid_argument otherwise.
+    // Wraps caller-owned, page-aligned memory without copying. The caller
+    // keeps it alive and frees it after this Buffer is destroyed.
     Buffer(MTL::Device* device, void* external_ptr, size_t size_bytes);
 
     ~Buffer();
@@ -33,7 +30,7 @@ class Buffer {
 
     void* contents() const;
 
-    // The requested size, 0 for an empty buffer (=1 byte allocation).
+    // Requested size; an empty buffer reports 0.
     size_t size() const { return size_; }
     MTL::Buffer* handle() const { return buffer_; }
 

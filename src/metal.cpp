@@ -1,5 +1,4 @@
-// metal-cpp is header-only.
-// These macros make this the one TU that emits its implementation.
+// The one TU that emits metal-cpp's implementation.
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION

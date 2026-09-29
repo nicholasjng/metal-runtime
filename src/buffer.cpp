@@ -10,9 +10,7 @@
 #include "metal.h"
 
 Buffer::Buffer(MTL::Device* device, size_t size_bytes) : size_(size_bytes) {
-    // newBuffer(0) returns nullptr, which would surface as "failed to allocate".
-    // A zero-element shape is legitimate (a degenerate axis in generated code),
-    // so round the allocation up to one byte and keep reporting size() == 0.
+    // newBuffer(0) returns nullptr; empty buffers get one byte.
     buffer_ = device->newBuffer(std::max<size_t>(size_bytes, 1), MTL::ResourceStorageModeShared);
     if (!buffer_) {
         throw AllocationError("failed to allocate Metal buffer of " + std::to_string(size_bytes) +
@@ -27,7 +25,6 @@ Buffer::Buffer(MTL::Device* device, void* external_ptr, size_t size_bytes) : siz
             "Buffer: external_ptr and size_bytes must both be a multiple of the page size (" +
             std::to_string(page_size) + " bytes) to wrap without copying");
     }
-    // No deallocator: the caller frees external_ptr, not this Buffer or Metal.
     buffer_ = device->newBuffer(external_ptr, size_bytes, MTL::ResourceStorageModeShared, nullptr);
     if (!buffer_) {
         throw AllocationError("failed to wrap external memory of " + std::to_string(size_bytes) +

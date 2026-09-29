@@ -6,10 +6,7 @@
 #include <QuartzCore/QuartzCore.hpp>
 // IWYU pragma: end_exports
 
-// NS::AutoreleasePool is what reclaims Cocoa objects from NS::String::string(...),
-// error out-params, and autoreleased Metal objects (MTL::{CommandBuffer,ComputeCommandEncoder}).
-// With none active, they leak for the process's lifetime instead of crashing.
-// Scopes that lifetime to one dispatch or compile.
+// Without a pool, autoreleased Cocoa/Metal objects leak for the process lifetime.
 struct AutoreleaseScope {
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     ~AutoreleaseScope() { pool->release(); }
