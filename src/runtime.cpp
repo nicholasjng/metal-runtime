@@ -93,9 +93,7 @@ void MetalRuntime::start_capture(const std::string& path) {
 
     NS::Error* error = nullptr;
     if (!manager->startCapture(descriptor, &error)) {
-        std::string message =
-            error ? error->localizedDescription()->utf8String() : "unknown Metal capture error";
-        throw CaptureError("failed to start Metal capture at " + path + ": " + message);
+        throw CaptureError("failed to start Metal capture at " + path + ": " + describe(error));
     }
     capture_started_ = true;
 }

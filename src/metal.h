@@ -1,9 +1,15 @@
 #pragma once
+#include <string>
 
 // IWYU pragma: begin_exports
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 // IWYU pragma: end_exports
+
+// Metal's description of a failure; it may hand back no NSError at all.
+inline std::string describe(NS::Error* error) {
+    return error ? error->localizedDescription()->utf8String() : "unknown error";
+}
 
 // Without a pool, autoreleased Cocoa/Metal objects leak for the process lifetime.
 struct AutoreleaseScope {

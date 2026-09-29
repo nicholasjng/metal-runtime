@@ -44,8 +44,7 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
     pipeline_ = NS::TransferPtr(device->newComputePipelineState(
         function, MTL::PipelineOptionBindingInfo, &reflection, &error));
     if (!pipeline_) {
-        std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
-        throw PipelineBuildError("failed to build compute pipeline: " + message);
+        throw PipelineBuildError("failed to build compute pipeline: " + describe(error));
     }
     max_threads_per_threadgroup_ = pipeline_->maxTotalThreadsPerThreadgroup();
     thread_execution_width_ = pipeline_->threadExecutionWidth();
@@ -311,10 +310,7 @@ void CommandBatch::wait() {
     }
 
     if (command_buffer_->status() == MTL::CommandBufferStatusError) {
-        NS::Error* error = command_buffer_->error();
-        std::string message =
-            error ? error->localizedDescription()->utf8String() : "unknown GPU error";
-        throw DispatchError("kernel execution failed: " + message);
+        throw DispatchError("kernel execution failed: " + describe(command_buffer_->error()));
     }
 }
 
