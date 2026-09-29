@@ -6,7 +6,7 @@
 #include <Metal/Metal.hpp>
 // IWYU pragma: end_exports
 
-// Metal's description of a failure; it may hand back no NSError at all.
+// Metal may return no NSError at all.
 inline std::string describe(NS::Error* error) {
     return error ? error->localizedDescription()->utf8String() : "unknown error";
 }

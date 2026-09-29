@@ -34,7 +34,7 @@ struct BindingInfo {
 
 class MR_API ComputePipeline {
    public:
-    // `label` is for error messages only.
+    // `label` is the function name, used in error messages.
     ComputePipeline(MTL::Device* device, MTL::Function* function, const std::string& label);
     ~ComputePipeline();
     ComputePipeline(ComputePipeline&&) = delete;

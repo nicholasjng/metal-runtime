@@ -34,8 +34,8 @@ size_t rounded_threadgroup_length(size_t length) {
            kThreadgroupMemoryAlignment;
 }
 
-// Everything Metal would fault, abort, or silently misbehave on, checked on
-// the host. The order fixes which error a launch with several faults reports.
+// Host-side checks for what Metal would fault, abort or misbehave on. Check
+// order decides which error a launch with several faults reports.
 void validate(const Launch& launch, bool non_uniform, size_t max_threadgroup_memory) {
     const ComputePipeline* pipeline = launch.pipeline;
     if (!pipeline) throw std::invalid_argument("dispatch: launch has no pipeline");

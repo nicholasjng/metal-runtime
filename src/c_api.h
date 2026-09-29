@@ -44,13 +44,12 @@ typedef enum MRMathMode {
 // No-op on NULL. Every *out_err_msg below is untouched on success.
 MR_EXPORT void mr_free_error_message(char* msg);
 
-// Compiles MSL source.
 MR_EXPORT MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len,
                                       MRMathMode math_mode, MRLibrary** out_library,
                                       char** out_err_msg);
 MR_EXPORT void mr_release_library(MRLibrary* library);
 
-// Builds (and caches) the named kernel's pipeline.
+// Cached per library and function name.
 MR_EXPORT MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name,
                                    MRPipeline** out_pipeline, char** out_err_msg);
 MR_EXPORT void mr_release_pipeline(MRPipeline* pipeline);
@@ -66,7 +65,7 @@ MR_EXPORT MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_b
 // Copies the contents back to `ptr` after a dispatch. No-op for a zero-copy wrap.
 MR_EXPORT MRStatus mr_buffer_flush_to(MRBuffer* buffer, char** out_err_msg);
 
-// Releases the handle. Never frees the pointer passed to mr_wrap_buffer.
+// Never frees the wrapped pointer.
 MR_EXPORT void mr_release_buffer(MRBuffer* buffer);
 
 // One kernel launch. buffers/buffer_offsets and scalars/scalar_sizes are
@@ -85,7 +84,7 @@ typedef struct MRLaunchDesc {
     size_t threadgroup_x, threadgroup_y, threadgroup_z;
 } MRLaunchDesc;
 
-// Encodes one launch and waits for it.
+// Blocks until the launch completes.
 MR_EXPORT MRStatus mr_dispatch(const MRLaunchDesc* launch, char** out_err_msg);
 
 // Launches in one command buffer: create, add each launch (the descriptor is
