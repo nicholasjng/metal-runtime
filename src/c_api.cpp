@@ -272,19 +272,6 @@ struct MRBatch {
     CommandBatch batch;
 };
 
-MRStatus mr_dispatch_async(const MRLaunchDesc* launch_desc, MRBatch** out_batch,
-                           char** out_err_msg) {
-    if (out_batch) *out_batch = nullptr;
-    return mr_guard(out_err_msg, [&] {
-        if (!out_batch) throw std::invalid_argument("mr_dispatch_async: out_batch is null");
-        Launch launch = build_launch(launch_desc, "mr_dispatch_async");
-        auto handle = std::make_unique<MRBatch>(runtime());
-        handle->batch.add(launch);
-        handle->batch.commit();
-        *out_batch = handle.release();
-    });
-}
-
 MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg) {
     return mr_guard(out_err_msg, [&] {
         if (!batch) throw std::invalid_argument("mr_batch_wait: batch is null");

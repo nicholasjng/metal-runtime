@@ -86,13 +86,6 @@ def lib():
     ]
     handle.mr_dispatch.restype = ctypes.c_int
 
-    handle.mr_dispatch_async.argtypes = [
-        ctypes.POINTER(MRLaunchDesc),
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(ctypes.c_char_p),
-    ]
-    handle.mr_dispatch_async.restype = ctypes.c_int
-
     handle.mr_batch_wait.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_char_p),
@@ -164,6 +157,22 @@ def _dispatch_add_one(lib, pipeline, buffer, n: int):
     err = ctypes.c_char_p()
     status = lib.mr_dispatch(ctypes.byref(desc), ctypes.byref(err))
     return status, err
+
+
+def _dispatch_async(lib, desc):
+    """One launch in flight: mr_batch_create, mr_batch_add, mr_batch_commit.
+    On failure the batch is released and the returned handle is null."""
+    batch = ctypes.c_void_p()
+    err = ctypes.c_char_p()
+    status = lib.mr_batch_create(ctypes.byref(batch), ctypes.byref(err))
+    if status == MR_OK:
+        status = lib.mr_batch_add(batch, ctypes.byref(desc), ctypes.byref(err))
+    if status == MR_OK:
+        status = lib.mr_batch_commit(batch, ctypes.byref(err))
+    if status != MR_OK and batch.value:
+        lib.mr_release_batch(batch)
+        batch = ctypes.c_void_p()
+    return status, batch, err
 
 
 def test_compile_and_dispatch_round_trip_with_a_misaligned_buffer(lib):
@@ -372,8 +381,8 @@ def test_concurrent_dispatch_against_one_shared_pipeline_does_not_corrupt(lib):
 
 
 def test_async_dispatch_overlaps_and_offsets_partition_one_buffer(lib):
-    """Several in-flight mr_dispatch_async launches, each aimed at a
-    different offset of the same wrapped buffer, must all land."""
+    """Several in-flight batches, each aimed at a different offset of the
+    same wrapped buffer, must all land."""
     n_per_launch, n_launches = 256, 8
     status, library, err = _compile(lib, _ADD_ONE_SOURCE)
     assert status == MR_OK, err.value
@@ -404,11 +413,7 @@ def test_async_dispatch_overlaps_and_offsets_partition_one_buffer(lib):
         desc.threadgroup_memory_count = 0
         desc.grid_x, desc.grid_y, desc.grid_z = n_per_launch, 1, 1
         desc.threadgroup_x, desc.threadgroup_y, desc.threadgroup_z = 0, 0, 0
-        batch = ctypes.c_void_p()
-        err = ctypes.c_char_p()
-        status = lib.mr_dispatch_async(
-            ctypes.byref(desc), ctypes.byref(batch), ctypes.byref(err)
-        )
+        status, batch, err = _dispatch_async(lib, desc)
         assert status == MR_OK, err.value
         batches.append(batch)
 
@@ -455,9 +460,7 @@ def test_dispatch_rejects_offsets_outside_logical_wrapping(lib, async_dispatch, 
             desc.grid_x = desc.grid_y = desc.grid_z = 1
             desc.threadgroup_x = desc.threadgroup_y = desc.threadgroup_z = 1
             if async_dispatch:
-                status = lib.mr_dispatch_async(
-                    ctypes.byref(desc), ctypes.byref(batch), ctypes.byref(err)
-                )
+                status, batch, err = _dispatch_async(lib, desc)
             else:
                 status = lib.mr_dispatch(ctypes.byref(desc), ctypes.byref(err))
             assert status == 5, err.value
@@ -515,7 +518,7 @@ def test_zero_length_wrap_still_accepts_zero_offset(lib):
 def test_batch_add_encodes_many_launches_into_one_command_buffer(lib):
     """mr_batch_create/add/commit/wait: the descriptor is copied on add, so
     one descriptor whose offsets are rewritten between adds partitions a
-    buffer exactly like separate async dispatches would."""
+    buffer exactly like separate in-flight batches would."""
     n_per_launch, n_launches = 256, 16
     status, library, err = _compile(lib, _ADD_ONE_SOURCE)
     assert status == MR_OK, err.value
