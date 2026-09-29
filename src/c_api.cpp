@@ -144,6 +144,32 @@ MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name, MRPipeli
 
 void mr_release_pipeline(MRPipeline* pipeline) { delete pipeline; }
 
+MRStatus mr_device_info(MRDeviceInfo* out_info, char** out_err_msg) {
+    return mr_guard(out_err_msg, [&] {
+        if (!out_info) throw std::invalid_argument("mr_device_info: out_info is null");
+        MetalRuntime& rt = runtime();
+        *out_info = MRDeviceInfo{
+            rt.max_threads_per_threadgroup(), rt.max_threadgroup_memory_length(),
+            rt.max_buffer_length(),           rt.recommended_max_working_set_size(),
+            rt.has_unified_memory(),          rt.supports_non_uniform_threadgroups(),
+        };
+    });
+}
+
+MRStatus mr_pipeline_info(const MRPipeline* pipeline, MRPipelineInfo* out_info,
+                          char** out_err_msg) {
+    return mr_guard(out_err_msg, [&] {
+        if (!pipeline) throw std::invalid_argument("mr_pipeline_info: pipeline is null");
+        if (!out_info) throw std::invalid_argument("mr_pipeline_info: out_info is null");
+        const ComputePipeline& p = *pipeline->pipeline;
+        *out_info = MRPipelineInfo{
+            p.thread_execution_width(),
+            p.max_threads_per_threadgroup(),
+            p.static_threadgroup_memory_length(),
+        };
+    });
+}
+
 MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, char** out_err_msg) {
     if (out_buffer) *out_buffer = nullptr;
     return mr_guard(out_err_msg, [&] {

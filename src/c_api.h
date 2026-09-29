@@ -54,6 +54,29 @@ MR_EXPORT MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name
                                    MRPipeline** out_pipeline, char** out_err_msg);
 MR_EXPORT void mr_release_pipeline(MRPipeline* pipeline);
 
+// Limits of the device every mr_* call runs on. Metal has no device-wide SIMD
+// width; see MRPipelineInfo.
+typedef struct MRDeviceInfo {
+    size_t max_threads_per_threadgroup;
+    size_t max_threadgroup_memory_length;  // bytes
+    size_t max_buffer_length;              // bytes
+    size_t recommended_max_working_set_size;
+    int has_unified_memory;
+    int supports_non_uniform_threadgroups;  // else the grid must divide by the threadgroup
+} MRDeviceInfo;
+
+MR_EXPORT MRStatus mr_device_info(MRDeviceInfo* out_info, char** out_err_msg);
+
+// One kernel's limits, which register pressure can push below the device's.
+typedef struct MRPipelineInfo {
+    size_t thread_execution_width;  // the SIMD-group width
+    size_t max_threads_per_threadgroup;
+    size_t static_threadgroup_memory_length;  // bytes the kernel declares itself
+} MRPipelineInfo;
+
+MR_EXPORT MRStatus mr_pipeline_info(const MRPipeline* pipeline, MRPipelineInfo* out_info,
+                                    char** out_err_msg);
+
 // Wraps `ptr` for mr_dispatch without copying: the range is rounded out to
 // page boundaries (a Metal requirement) and dispatch binds at the true
 // offset. Falls back to an owned copy, synced back by mr_buffer_flush_to,

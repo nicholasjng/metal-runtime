@@ -10,6 +10,7 @@ import threading
 import numpy as np
 import pytest
 
+import metal_runtime as mr
 from metal_runtime import c_api
 
 _ADD_ONE_SOURCE = b"""
@@ -42,6 +43,25 @@ class MRLaunchDesc(ctypes.Structure):
     ]
 
 
+class MRDeviceInfo(ctypes.Structure):
+    _fields_ = [
+        ("max_threads_per_threadgroup", ctypes.c_size_t),
+        ("max_threadgroup_memory_length", ctypes.c_size_t),
+        ("max_buffer_length", ctypes.c_size_t),
+        ("recommended_max_working_set_size", ctypes.c_size_t),
+        ("has_unified_memory", ctypes.c_int),
+        ("supports_non_uniform_threadgroups", ctypes.c_int),
+    ]
+
+
+class MRPipelineInfo(ctypes.Structure):
+    _fields_ = [
+        ("thread_execution_width", ctypes.c_size_t),
+        ("max_threads_per_threadgroup", ctypes.c_size_t),
+        ("static_threadgroup_memory_length", ctypes.c_size_t),
+    ]
+
+
 @pytest.fixture(scope="module")
 def lib():
     path = os.path.join(c_api.library_dir(), "libmetal_runtime.dylib")
@@ -65,6 +85,19 @@ def lib():
         ctypes.POINTER(ctypes.c_char_p),
     ]
     handle.mr_get_pipeline.restype = ctypes.c_int
+
+    handle.mr_device_info.argtypes = [
+        ctypes.POINTER(MRDeviceInfo),
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    handle.mr_device_info.restype = ctypes.c_int
+
+    handle.mr_pipeline_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(MRPipelineInfo),
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    handle.mr_pipeline_info.restype = ctypes.c_int
 
     handle.mr_wrap_buffer.argtypes = [
         ctypes.c_void_p,
@@ -119,6 +152,7 @@ def lib():
 MR_OK = 0
 MR_ERROR_COMPILE = 2
 MR_ERROR_FUNCTION_NOT_FOUND = 3
+MR_ERROR_INVALID_ARGUMENT = 5
 
 # MRMathMode values from c_api.h.
 MR_MATH_MODE_FAST = 2
@@ -173,6 +207,62 @@ def _dispatch_async(lib, desc):
         lib.mr_release_batch(batch)
         batch = ctypes.c_void_p()
     return status, batch, err
+
+
+def test_device_info_matches_the_python_binding(lib):
+    info = MRDeviceInfo()
+    err = ctypes.c_char_p()
+    assert err.value is not None
+    assert lib.mr_device_info(ctypes.byref(info), ctypes.byref(err)) == MR_OK, err.value
+
+    expected = mr.device_info()
+    for name, _ in MRDeviceInfo._fields_:
+        key = "unified_memory" if name == "has_unified_memory" else name
+        assert getattr(info, name) == expected[key], name
+
+    assert lib.mr_device_info(None, ctypes.byref(err)) == MR_ERROR_INVALID_ARGUMENT
+    assert b"out_info is null" in err.value
+    lib.mr_free_error_message(err)
+
+
+def test_pipeline_info_reports_the_simdgroup_width_and_kernel_limits(lib):
+    source = b"""
+    #include <metal_stdlib>
+    using namespace metal;
+
+    kernel void staged(device float* buf [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+        threadgroup float scratch[64];
+        scratch[tid % 64] = buf[tid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        buf[tid] = scratch[(tid + 1) % 64];
+    }
+    """
+    status, library, err = _compile(lib, source)
+    assert status == MR_OK, err.value
+    status, pipeline, err = _get_pipeline(lib, library, b"staged")
+    assert status == MR_OK, err.value
+
+    info = MRPipelineInfo()
+    err = ctypes.c_char_p()
+    assert err.value is not None
+    status = lib.mr_pipeline_info(pipeline, ctypes.byref(info), ctypes.byref(err))
+    assert status == MR_OK, err.value
+
+    kernel = mr.Kernel(source.decode(), "staged")
+    assert info.thread_execution_width == kernel.thread_execution_width
+    assert info.max_threads_per_threadgroup == kernel.max_threads_per_threadgroup
+    assert (
+        info.static_threadgroup_memory_length == kernel.static_threadgroup_memory_length
+    )
+    assert info.static_threadgroup_memory_length >= 64 * 4
+
+    status = lib.mr_pipeline_info(None, ctypes.byref(info), ctypes.byref(err))
+    assert status == MR_ERROR_INVALID_ARGUMENT
+    assert b"pipeline is null" in err.value
+    lib.mr_free_error_message(err)
+
+    lib.mr_release_pipeline(pipeline)
+    lib.mr_release_library(library)
 
 
 def test_compile_and_dispatch_round_trip_with_a_misaligned_buffer(lib):
@@ -573,6 +663,7 @@ def test_batch_add_encodes_many_launches_into_one_command_buffer(lib):
     lib.mr_release_buffer(buffer)
 
     err = ctypes.c_char_p()
+    assert err.value is not None
     assert lib.mr_batch_add(None, ctypes.byref(desc), ctypes.byref(err)) != MR_OK
     assert b"batch is null" in err.value
     lib.mr_free_error_message(err)
