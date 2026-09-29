@@ -9,8 +9,7 @@
 
 namespace {
 
-// Metal's own ceiling on a setBytes argument. Past this the data has to live
-// in a Buffer, so say that rather than letting Metal fail the encode.
+// Metal's ceiling on a setBytes argument.
 constexpr size_t kMaxInlineScalarBytes = 4096;
 
 // Threadgroup memory allocations are sized in 16-byte units.
@@ -24,8 +23,6 @@ std::string to_string(Dim3 d) {
            ")";
 }
 
-// Round up rather than reject: the caller asked for room for N elements, and
-// Metal only allocates in 16-byte units.
 size_t rounded_threadgroup_length(size_t length) {
     if (length > std::numeric_limits<size_t>::max() - (kThreadgroupMemoryAlignment - 1)) {
         throw std::invalid_argument("dispatch: threadgroup memory allocation overflows");
@@ -37,38 +34,19 @@ size_t rounded_threadgroup_length(size_t length) {
 }  // namespace
 
 ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
-                                 const std::string& label, MTL::BinaryArchive* archive)
+                                 const std::string& label)
     : label_(label) {
     AutoreleaseScope scope;
     NS::Error* error = nullptr;
 
-    // setBinaryArchives() only exists on the descriptor-based overload.
-    MTL::ComputePipelineDescriptor* descriptor =
-        MTL::ComputePipelineDescriptor::alloc()->init()->autorelease();
-    descriptor->setComputeFunction(function);
-    if (archive) {
-        descriptor->setBinaryArchives(NS::Array::array(archive));
-    }
-
     // Binding reflection backs the host-side launch validation in add().
     MTL::ComputePipelineReflection* reflection = nullptr;
-    pipeline_ = device->newComputePipelineState(descriptor, MTL::PipelineOptionBindingInfo,
+    pipeline_ = device->newComputePipelineState(function, MTL::PipelineOptionBindingInfo,
                                                 &reflection, &error);
     function->release();
     if (!pipeline_) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
         throw PipelineBuildError("failed to build compute pipeline: " + message);
-    }
-    if (archive) {
-        // Not fatal: the pipeline above already built fine either way. But a
-        // cache that silently never populates is indistinguishable from one
-        // that works, so record the failure for pipeline_cache_status().
-        NS::Error* stage_error = nullptr;
-        if (!archive->addComputePipelineFunctions(descriptor, &stage_error)) {
-            std::string message =
-                stage_error ? stage_error->localizedDescription()->utf8String() : "unknown error";
-            runtime().note_archive_add_failure(message);
-        }
     }
     max_threads_per_threadgroup_ = pipeline_->maxTotalThreadsPerThreadgroup();
     thread_execution_width_ = pipeline_->threadExecutionWidth();
@@ -93,34 +71,17 @@ ComputePipeline::~ComputePipeline() {
     if (pipeline_) pipeline_->release();
 }
 
-ComputePipeline::ComputePipeline(ComputePipeline&& other) noexcept
-    : pipeline_(other.pipeline_),
-      label_(std::move(other.label_)),
-      buffer_bindings_(std::move(other.buffer_bindings_)),
-      threadgroup_bindings_(std::move(other.threadgroup_bindings_)),
-      max_threads_per_threadgroup_(other.max_threads_per_threadgroup_),
-      thread_execution_width_(other.thread_execution_width_),
-      static_threadgroup_memory_length_(other.static_threadgroup_memory_length_) {
-    other.pipeline_ = nullptr;
-}
-
-size_t ComputePipeline::max_threads_per_threadgroup() const { return max_threads_per_threadgroup_; }
-
-size_t ComputePipeline::thread_execution_width() const { return thread_execution_width_; }
-
-size_t ComputePipeline::static_threadgroup_memory_length() const {
-    return static_threadgroup_memory_length_;
-}
-
 void ComputePipeline::validate_shape(size_t binding_count,
                                      const std::vector<size_t>& threadgroup_memory, Dim3 tg,
                                      size_t device_max_threadgroup_memory) {
-    LaunchShape shape{binding_count, device_max_threadgroup_memory, tg, threadgroup_memory};
-
     {
         std::lock_guard<std::mutex> lock(shape_cache_mutex_);
         for (const LaunchShape& seen : validated_shapes_) {
-            if (seen == shape) return;
+            if (seen.binding_count == binding_count &&
+                seen.device_max_threadgroup_memory == device_max_threadgroup_memory &&
+                seen.threadgroup == tg && seen.threadgroup_memory == threadgroup_memory) {
+                return;
+            }
         }
     }
 
@@ -185,7 +146,8 @@ void ComputePipeline::validate_shape(size_t binding_count,
 
     std::lock_guard<std::mutex> lock(shape_cache_mutex_);
     if (validated_shapes_.size() < kMaxValidatedShapes) {
-        validated_shapes_.push_back(std::move(shape));
+        validated_shapes_.push_back(
+            LaunchShape{binding_count, device_max_threadgroup_memory, tg, threadgroup_memory});
     }
 }
 
@@ -209,17 +171,13 @@ Dim3 ComputePipeline::default_threadgroup(Dim3 grid) const {
     return tg;
 }
 
-CommandBatch::CommandBatch(MTL::CommandQueue* queue, bool concurrent) {
+CommandBatch::CommandBatch(MetalRuntime& rt, bool concurrent)
+    : non_uniform_(rt.supports_non_uniform_threadgroups()),
+      max_threadgroup_memory_(rt.max_threadgroup_memory_length()) {
     AutoreleaseScope scope;
-    MTL::Device* device = queue->device();
-    non_uniform_ =
-        device->supportsFamily(MTL::GPUFamilyApple4) || device->supportsFamily(MTL::GPUFamilyMac2);
-    max_threadgroup_memory_ = device->maxThreadgroupMemoryLength();
+    MTL::CommandQueue* queue = rt.queue();
 
-    // Both come back autoreleased. A batch outlives the pool that created it
-    // (it stays open across successive add() calls, which in the Python
-    // bindings means across separate calls into the extension), so retain
-    // them and hand the references back in the destructor.
+    // Both come back autoreleased and the batch outlives this pool, so retain.
     command_buffer_ = queue->commandBuffer();
     if (!command_buffer_) {
         throw DispatchError("could not create a Metal command buffer");
@@ -236,9 +194,7 @@ CommandBatch::CommandBatch(MTL::CommandQueue* queue, bool concurrent) {
 }
 
 CommandBatch::~CommandBatch() {
-    // An abandoned batch (an exception between add() and wait()) still holds a
-    // live encoder; Metal insists the encoding be closed before the command
-    // buffer is released.
+    // Metal requires an open encoder to be ended before its command buffer is released.
     if (!committed_ && encoder_) encoder_->endEncoding();
     if (encoder_) encoder_->release();
     if (command_buffer_) command_buffer_->release();
@@ -313,7 +269,6 @@ void CommandBatch::add(const Launch& launch) {
 
     MTL::Size mtl_tg = MTL::Size::Make(tg.x, tg.y, tg.z);
     if (launch.indirect_grid) {
-        // Indirect counts are threadgroups; there is no non-uniform variant.
         encoder_->dispatchThreadgroups(launch.indirect_grid->handle(), launch.indirect_offset,
                                        mtl_tg);
     } else if (non_uniform_) {
@@ -352,9 +307,7 @@ void CommandBatch::wait() {
         commit_locked();
     }
     {
-        // Every caller blocks until completion: waitUntilCompleted is
-        // thread-safe and returns immediately on a finished buffer, so
-        // repeated waits stay cheap without an early-out flag.
+        // Every caller blocks; waitUntilCompleted returns at once on a finished buffer.
         AutoreleaseScope scope;
         command_buffer_->waitUntilCompleted();
     }
@@ -363,9 +316,6 @@ void CommandBatch::wait() {
     if (!waited_) {
         waited_ = true;
         gpu_time_ = command_buffer_->GPUEndTime() - command_buffer_->GPUStartTime();
-        timestamps_ =
-            Timestamps{command_buffer_->kernelStartTime(), command_buffer_->kernelEndTime(),
-                       command_buffer_->GPUStartTime(), command_buffer_->GPUEndTime()};
     }
 
     if (command_buffer_->status() == MTL::CommandBufferStatusError) {
@@ -376,8 +326,8 @@ void CommandBatch::wait() {
     }
 }
 
-void dispatch(MTL::CommandQueue* queue, const Launch& launch) {
-    CommandBatch batch(queue);
+void dispatch(MetalRuntime& rt, const Launch& launch) {
+    CommandBatch batch(rt);
     batch.add(launch);
     batch.wait();
 }

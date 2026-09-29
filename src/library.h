@@ -1,49 +1,38 @@
 #pragma once
 #include <array>
-#include <condition_variable>
 #include <cstdint>
-#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "dtype.h"
+#include "export.h"
+#include "lru.h"
 
 namespace MTL {
 class Device;
 class Library;
 class Function;
-class BinaryArchive;
 }  // namespace MTL
 
 class ComputePipeline;
 
-// How much freedom the Metal compiler has to rewrite floating-point
-// arithmetic. `Fast` is Metal's own default, and it permits reassociation:
-// under it the compensation term of a Kahan summation, `c = (t - s) - y`,
-// folds algebraically to zero and is deleted outright, with no diagnostic.
-// Anything built on error-free transformations (compensated accumulation,
-// double-single arithmetic), has to compile under `Safe` to survive.
+// `Fast` (Metal's default) permits reassociation, which silently deletes
+// compensated-arithmetic error terms; such code needs `Safe`.
 enum class MathMode { Safe, Relaxed, Fast };
 
-// Compile-time configuration for one MSL translation unit.
-// Part of the library cache key, so different options produce different libraries.
-struct CompileOptions {
-    MathMode math_mode = MathMode::Fast;  // Metal's default, kept as ours
-
-    // Emitted as preprocessor macros.
-    std::map<std::string, std::string> defines;
+// Part of the library cache key.
+struct MR_API CompileOptions {
+    MathMode math_mode = MathMode::Fast;
+    std::map<std::string, std::string> defines;  // preprocessor macros
 
     std::string cache_key() const;
 };
 
-// One MSL function constant, baked in at pipeline build. Unlike `defines`,
-// specializing skips recompiling the library.
+// One MSL function constant, baked in at pipeline build without recompiling the library.
 struct FunctionConstant {
     enum class Kind : uint8_t { Bool, Int, Float, Exact };
 
@@ -51,69 +40,49 @@ struct FunctionConstant {
     Kind kind = Kind::Exact;
     bool bool_value = false;
     long long int_value = 0;
-    // Set only when a Python int overflows `long long` (i.e. > INT64_MAX),
-    // the one case a ulong constant can represent that int_value cannot.
-    unsigned long long uint_value = 0;
+    unsigned long long uint_value = 0;  // used when int_value overflows (> INT64_MAX)
     bool int_is_wide_unsigned = false;
     double float_value = 0.0;
-    DType dtype{};  // Exact only
-    // Exact only: raw little-endian bytes, the first dtype.itemsize() meaningful.
-    std::array<uint8_t, 8> value{};
+    DType dtype{};                   // Exact only
+    std::array<uint8_t, 8> value{};  // Exact only: little-endian bytes
 };
 using FunctionConstants = std::vector<FunctionConstant>;
 
-// Thrown when newLibrary fails to compile MSL source.
-struct MSLCompileError : std::runtime_error {
+struct MR_API MSLCompileError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
 // The source compiled but has no such entry point.
-struct MSLFunctionNotFoundError : MSLCompileError {
+struct MR_API MSLFunctionNotFoundError : MSLCompileError {
     using MSLCompileError::MSLCompileError;
 };
 
-// Compiles MSL source at runtime via newLibrary, no metal/metallib toolchain needed.
-class Library {
+// MSL source compiled at runtime via newLibrary.
+class MR_API Library {
    public:
     Library(MTL::Device* device, const std::string& msl_source, const CompileOptions& options = {});
     ~Library();
-    Library(Library&& other) noexcept;
+    Library(Library&&) = delete;
     Library(const Library&) = delete;
     Library& operator=(const Library&) = delete;
 
-    // Caller-owned; throws MSLFunctionNotFoundError if `name` isn't found,
-    // MSLCompileError if `constants` doesn't satisfy the function's declared
-    // constants (missing required, unknown name, type mismatch).
-    MTL::Function* function(const std::string& name, const FunctionConstants& constants = {}) const;
-
-    // Evicting a library drops its pipelines with it.
-    // `archive` passes straight through to ComputePipeline on a cache miss.
+    // Cached per (name, constants as given). Throws MSLFunctionNotFoundError
+    // for an unknown name, MSLCompileError for constants that don't match
+    // the function's declaration.
     std::shared_ptr<ComputePipeline> pipeline_for(const std::string& name,
-                                                  const FunctionConstants& constants = {},
-                                                  std::shared_ptr<MTL::BinaryArchive> archive = {});
+                                                  const FunctionConstants& constants = {});
 
    private:
     bool has_function(const std::string& name) const;
 
-    // Reflects the *unspecialized* function for its declared constants.
-    // Validates and coerces `constants` against them, then creates via the constantValues variant.
-    MTL::Function* create_specialized(const std::string& name, const FunctionConstants& constants,
-                                      FunctionConstants* canonical) const;
+    // Validates `constants` against reflection, then specializes. Caller owns the result.
+    MTL::Function* create_specialized(const std::string& name,
+                                      const FunctionConstants& constants) const;
 
-    MTL::Device* device_ = nullptr;  // borrowed from the runtime singleton
+    MTL::Device* device_ = nullptr;  // borrowed
     MTL::Library* library_ = nullptr;
 
     static constexpr size_t kMaxCachedPipelines = 128;
     std::mutex mutex_;
-    using PipelineLRU = std::list<std::string>;
-    PipelineLRU pipeline_lru_;
-    std::unordered_map<std::string,
-                       std::pair<std::shared_ptr<ComputePipeline>, PipelineLRU::iterator>>
-        pipelines_;
-    std::unordered_set<std::string> pipelines_building_;
-    std::condition_variable pipeline_build_cv_;
-
-    void cache_pipeline_locked(const std::string& key,
-                               const std::shared_ptr<ComputePipeline>& pipeline);
-    std::shared_ptr<ComputePipeline> find_pipeline_locked(const std::string& key);
+    LruCache<ComputePipeline> pipelines_{kMaxCachedPipelines};
 };

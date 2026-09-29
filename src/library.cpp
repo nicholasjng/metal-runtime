@@ -3,16 +3,13 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
-#include <utility>
 #include <vector>
 
 #include "dispatch.h"
 #include "metal.h"
 
 std::string CompileOptions::cache_key() const {
-    // Every variable-length field is length-prefixed, so no two distinct
-    // option sets can serialize to the same bytes. A define named "a=1" and
-    // a define "a" valued "1" stay distinguishable.
+    // Length-prefixed fields keep the key injective.
     std::string out = "math=" + std::to_string((int)(math_mode));
     for (const auto& [name, value] : defines) {
         out += ";" + std::to_string(name.size()) + ":" + name;
@@ -35,19 +32,16 @@ MTL::MathMode to_mtl(MathMode mode) {
     return MTL::MathModeFast;
 }
 
-// Caller owns nothing: everything here is autoreleased into the enclosing
-// AutoreleaseScope, including the returned dictionary.
+// Everything here is autoreleased into the enclosing AutoreleaseScope.
 MTL::CompileOptions* build_options(const CompileOptions& options) {
     MTL::CompileOptions* mtl_options = MTL::CompileOptions::alloc()->init()->autorelease();
-    // Request MSL 4.0 whenever the OS can compile it.
     if (__builtin_available(macOS 26.0, *)) {
         mtl_options->setLanguageVersion(MTL::LanguageVersion4_0);
     }
     if (__builtin_available(macOS 15.0, *)) {
         mtl_options->setMathMode(to_mtl(options.math_mode));
     } else {
-        // mathMode is macOS 15+; the selector crashes on older OSes.
-        // The legacy boolean keeps what matters: SAFE preserves EFTs.
+        // mathMode is macOS 15+; the legacy boolean still keeps SAFE exact.
         mtl_options->setFastMathEnabled(options.math_mode != MathMode::Safe);
     }
 
@@ -66,8 +60,7 @@ MTL::CompileOptions* build_options(const CompileOptions& options) {
     return mtl_options;
 }
 
-// The scalar MSL types a function constant can have, mapped in both directions:
-// MTL::DataType for Metal, DType for the canonical cache key, the MSL spelling for error messages.
+// The scalar MSL types a function constant can have.
 struct TypeEntry {
     MTL::DataType mtl;
     DType dtype;
@@ -96,7 +89,6 @@ const TypeEntry* type_entry(MTL::DataType t) {
     return nullptr;
 }
 
-// One entry point's declared constants, from reflection on the unspecialized function.
 struct DeclaredConstant {
     MTL::DataType type;
     bool required;
@@ -114,7 +106,6 @@ std::map<std::string, DeclaredConstant> read_declared(MTL::Function* fn) {
 }
 
 // Coerces one provided constant to its declared MSL type.
-// The result is exact with the declared dtype and the typed value bytes.
 FunctionConstant coerce(const FunctionConstant& c, MTL::DataType declared) {
     const TypeEntry* target = type_entry(declared);
     if (!target) {
@@ -202,7 +193,6 @@ FunctionConstant coerce(const FunctionConstant& c, MTL::DataType declared) {
                     put((uint32_t)v);
                     return out;
                 case MTL::DataTypeULong:
-                    // Any non-negative long long fits a ulong.
                     in_range(0, INT64_MAX);
                     put((uint64_t)v);
                     return out;
@@ -217,8 +207,7 @@ FunctionConstant coerce(const FunctionConstant& c, MTL::DataType declared) {
     throw std::logic_error("unreachable: unhandled FunctionConstant::Kind");
 }
 
-// Injective, same contract as CompileOptions::cache_key. Flexible kinds are
-// tagged so a pre-coercion key can't collide with a canonical one.
+// Injective, like CompileOptions::cache_key.
 std::string pipeline_key(const std::string& name, const FunctionConstants& constants) {
     std::string key = std::to_string(name.size()) + ":" + name;
     for (const FunctionConstant& c : constants) {
@@ -267,14 +256,6 @@ Library::~Library() {
     if (library_) library_->release();
 }
 
-Library::Library(Library&& other) noexcept
-    : device_(other.device_),
-      library_(other.library_),
-      pipeline_lru_(std::move(other.pipeline_lru_)),
-      pipelines_(std::move(other.pipelines_)) {
-    other.library_ = nullptr;
-}
-
 bool Library::has_function(const std::string& name) const {
     AutoreleaseScope scope;
     NS::Array* names = library_->functionNames();
@@ -285,14 +266,8 @@ bool Library::has_function(const std::string& name) const {
     return false;
 }
 
-MTL::Function* Library::function(const std::string& name,
-                                 const FunctionConstants& constants) const {
-    return create_specialized(name, constants, nullptr);
-}
-
 MTL::Function* Library::create_specialized(const std::string& name,
-                                           const FunctionConstants& constants,
-                                           FunctionConstants* canonical) const {
+                                           const FunctionConstants& constants) const {
     AutoreleaseScope scope;
     NS::String* fn_name = NS::String::string(name.c_str(), NS::UTF8StringEncoding);
 
@@ -309,11 +284,8 @@ MTL::Function* Library::create_specialized(const std::string& name,
     // No constants declared, none provided: the probe *is* the function.
     if (declared.empty() && constants.empty()) return probe;
 
-    // Metal neither rejects an unset required constant (it specializes to an
-    // undefined value) nor a misspelled name, so both are checked here.
-    // Constants the entry point doesn't use don't appear in its dictionary
-    // and are rejected as unknown; optional ones (guarded by
-    // is_function_constant_defined) report required=false and may be omitted.
+    // Metal silently accepts an unset required constant (it specializes to an
+    // undefined value) and a misspelled name, so both are checked here.
     std::string missing;
     for (const auto& entry : declared) {
         const std::string& declared_name = entry.first;
@@ -367,81 +339,19 @@ MTL::Function* Library::create_specialized(const std::string& name,
         throw MSLCompileError("failed to specialize MSL function '" + name +
                               "' with the given constants: " + message);
     }
-    if (canonical) *canonical = std::move(coerced);
     return fn;
 }
 
-std::shared_ptr<ComputePipeline> Library::pipeline_for(
-    const std::string& name, const FunctionConstants& constants,
-    std::shared_ptr<MTL::BinaryArchive> archive) {
+std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
+                                                       const FunctionConstants& constants) {
     const std::string key = pipeline_key(name, constants);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (auto cached = find_pipeline_locked(key)) return cached;
+        if (auto hit = pipelines_.find(key)) return hit;
     }
-
-    FunctionConstants canonical;
-    MTL::Function* fn = create_specialized(name, constants, &canonical);
-
-    // Coercion may map this spelling onto a pipeline that already exists under another
-    // ({N: 8} vs {N: np.uint32(8)}). Alias rather than build a duplicate.
-    const std::string canonical_key = pipeline_key(name, canonical);
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        while (true) {
-            if (auto cached = find_pipeline_locked(canonical_key)) {
-                if (key != canonical_key) cache_pipeline_locked(key, cached);
-                fn->release();
-                return cached;
-            }
-            if (pipelines_building_.insert(canonical_key).second) break;
-            pipeline_build_cv_.wait(lock);
-        }
-    }
-
-    // Different specializations can still build in parallel. A waiter for
-    // this key sleeps until its one pipeline build has been published.
-    try {
-        auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name, archive.get());
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_pipeline_locked(canonical_key, pipeline);
-        if (key != canonical_key) cache_pipeline_locked(key, pipeline);
-        pipelines_building_.erase(canonical_key);
-        pipeline_build_cv_.notify_all();
-        return pipeline;
-    } catch (...) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pipelines_building_.erase(canonical_key);
-        pipeline_build_cv_.notify_all();
-        throw;
-    }
-}
-
-std::shared_ptr<ComputePipeline> Library::find_pipeline_locked(const std::string& key) {
-    auto it = pipelines_.find(key);
-    if (it == pipelines_.end()) return nullptr;
-    pipeline_lru_.splice(pipeline_lru_.begin(), pipeline_lru_, it->second.second);
-    return it->second.first;
-}
-
-void Library::cache_pipeline_locked(const std::string& key,
-                                    const std::shared_ptr<ComputePipeline>& pipeline) {
-    auto found = pipelines_.find(key);
-    if (found != pipelines_.end()) {
-        found->second.first = pipeline;
-        pipeline_lru_.splice(pipeline_lru_.begin(), pipeline_lru_, found->second.second);
-        return;
-    }
-
-    pipeline_lru_.push_front(key);
-    try {
-        pipelines_.emplace(key, std::make_pair(pipeline, pipeline_lru_.begin()));
-    } catch (...) {
-        pipeline_lru_.pop_front();
-        throw;
-    }
-    while (pipelines_.size() > kMaxCachedPipelines) {
-        pipelines_.erase(pipeline_lru_.back());
-        pipeline_lru_.pop_back();
-    }
+    // Built outside the lock; a racing build of the same key is dropped.
+    MTL::Function* fn = create_specialized(name, constants);
+    auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pipelines_.insert(key, std::move(pipeline));
 }
