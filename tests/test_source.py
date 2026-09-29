@@ -25,58 +25,30 @@ def test_assemble_escapes_labels():
     assert src.startswith('#line 1 "we\\"ird\\\\label"\n')
 
 
-def test_build_source_includes_metal_stdlib_by_default():
-    src = mr.build_source(body="// body")
-    assert src.startswith('#line 1 "includes"\n#include <metal_stdlib>\n')
+def _includes() -> mr.Fragment:
+    return mr.Fragment(
+        "includes", "\n".join(f"#include <{name}>" for name in mr.DEFAULT_INCLUDES)
+    )
+
+
+def test_default_includes_are_metal_stdlib():
     assert mr.DEFAULT_INCLUDES == ("metal_stdlib",)
 
 
-def test_build_source_includes_override_replaces_default():
-    src = mr.build_source(includes=("metal_tensor",), body="// body")
-    assert "#include <metal_tensor>" in src
-    assert "#include <metal_stdlib>" not in src
-
-
-def test_build_source_empty_includes_omits_includes_fragment():
-    src = mr.build_source(includes=(), body="// body")
-    assert "#include" not in src
-    assert src == '#line 1 "body"\n// body\n'
-
-
-def test_build_source_fragment_order_is_includes_preludes_body():
-    src = mr.build_source(
-        includes=("metal_stdlib",),
-        preludes=(mr.Fragment("helpers", "// helper"),),
-        body="// body",
-        body_label="my_kernel",
-    )
-    markers = [line for line in src.splitlines() if line.startswith("#line")]
-    assert markers == [
-        '#line 1 "includes"',
-        '#line 1 "helpers"',
-        '#line 1 "my_kernel"',
-    ]
-
-
 def test_kernel_compiles_and_runs_with_default_includes():
-    kernel = mr.Kernel(mr.build_source(body=ADD_ONE_BODY), "add_one")
+    kernel = mr.Kernel(
+        mr.assemble(_includes(), mr.Fragment("body", ADD_ONE_BODY)), "add_one"
+    )
     buf = mr.Buffer(np.zeros(8, dtype=np.float32))
     mr.run(kernel, grid=(8, 1, 1), buffers=[buf])
     np.testing.assert_array_equal(buf.to_numpy(), np.ones(8, dtype=np.float32))
 
 
-def test_compile_error_is_attributed_to_the_body_fragment():
-    src = mr.build_source(
-        body="kernel void f(device float* o [[buffer(0)]]) { o[0] = bogus; }",
-    )
-    with pytest.raises(mr.CompileError, match=r"body:1:"):
-        mr.Kernel(src, "f")
-
-
-def test_compile_error_is_attributed_to_a_prelude_fragment():
-    src = mr.build_source(
-        preludes=(mr.Fragment("helpers", "float broken(float x) { return y; }"),),
-        body=ADD_ONE_BODY,
+def test_compile_error_is_attributed_to_the_failing_fragment():
+    src = mr.assemble(
+        _includes(),
+        mr.Fragment("helpers", "float broken(float x) { return y; }"),
+        mr.Fragment("body", ADD_ONE_BODY),
     )
     with pytest.raises(mr.CompileError, match=r"helpers:1:"):
         mr.Kernel(src, "add_one")

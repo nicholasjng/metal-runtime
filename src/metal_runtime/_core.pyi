@@ -37,15 +37,6 @@ def stop_capture() -> None:
 def is_capturing() -> bool:
     """Whether a Metal trace capture is currently active in this process."""
 
-def device_name() -> str:
-    """
-    Name of the default Metal device.
-
-    Returns
-    -------
-    str
-    """
-
 def device_info() -> dict:
     """
     Device capabilities and limits.
@@ -58,15 +49,6 @@ def device_info() -> dict:
         max_buffer_length, supports_non_uniform_threadgroups.
     """
 
-def supported_dtypes() -> str:
-    """
-    Comma-separated list of dtype names Buffer accepts.
-
-    Returns
-    -------
-    str
-    """
-
 def library_cache_size() -> int:
     """
     Number of compiled MSL libraries currently cached.
@@ -74,16 +56,6 @@ def library_cache_size() -> int:
     Returns
     -------
     int
-    """
-
-def library_cache_limit() -> int:
-    """
-    Current cap on cached libraries.
-
-    Returns
-    -------
-    int
-        0 means unlimited.
     """
 
 def set_library_cache_limit(limit: int) -> None:
@@ -279,14 +251,6 @@ class Kernel:
     @property
     def math_mode(self) -> MathMode:
         """Compiled math mode."""
-
-    @property
-    def defines(self) -> dict[str, str]:
-        """Preprocessor macros this kernel compiled with."""
-
-    @property
-    def constants(self) -> dict:
-        """Function constant values this kernel was specialized with."""
 
     @property
     def max_threads_per_threadgroup(self) -> int:

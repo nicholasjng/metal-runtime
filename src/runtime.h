@@ -45,7 +45,6 @@ class MR_API MetalRuntime {
 
     // 0 disables eviction.
     void set_library_cache_limit(size_t limit);
-    size_t library_cache_limit() const;
     size_t library_cache_size() const;
     void clear_library_cache();
 
