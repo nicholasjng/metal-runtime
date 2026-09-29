@@ -389,6 +389,9 @@ class PyBatch {
         }
     }
 
+    // A `with` target or traceback can keep the batch alive long after the body raised.
+    void discard() { batch_.discard(); }
+
     std::optional<double> gpu_time() const { return batch_.gpu_time(); }
 
    private:
@@ -711,7 +714,8 @@ DispatchError
 )doc");
 
     nb::class_<PyBatch>(m, "Batch")
-        .def(nb::init<bool>(), "concurrent"_a = false,
+        // A full command queue blocks until a slot frees, so not with the GIL held.
+        .def(nb::init<bool>(), "concurrent"_a = false, nb::call_guard<nb::gil_scoped_release>(),
              R"doc(
 Encode several launches into one command buffer.
 
@@ -754,8 +758,11 @@ DispatchError
         .def(
             "__exit__",
             [](PyBatch& b, nb::handle exc_type, nb::handle, nb::handle) {
-                // If the body raised, the destructor discards the batch uncommitted.
-                if (exc_type.is_none()) b.wait();
+                if (exc_type.is_none()) {
+                    b.wait();
+                } else {
+                    b.discard();
+                }
             },
             nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none(),
             nb::sig("def __exit__(self, exc_type: type[BaseException] | None, exc_value: "

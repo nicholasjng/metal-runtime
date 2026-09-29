@@ -87,7 +87,7 @@ void MetalRuntime::start_capture(const std::string& path) {
     // A device capture includes queues owned by other bindings in the process.
     descriptor->setCaptureObject(device_.get());
     descriptor->setDestination(MTL::CaptureDestinationGPUTraceDocument);
-    NS::String* output_path = NS::String::string(path.c_str(), NS::UTF8StringEncoding);
+    NS::String* output_path = to_ns_string(path, "capture path");
     descriptor->setOutputURL(NS::URL::fileURLWithPath(output_path));
 
     NS::Error* error = nullptr;

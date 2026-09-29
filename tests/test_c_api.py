@@ -212,7 +212,6 @@ def _dispatch_async(lib, desc):
 def test_device_info_matches_the_python_binding(lib):
     info = MRDeviceInfo()
     err = ctypes.c_char_p()
-    assert err.value is not None
     assert lib.mr_device_info(ctypes.byref(info), ctypes.byref(err)) == MR_OK, err.value
 
     expected = mr.device_info()
@@ -221,6 +220,7 @@ def test_device_info_matches_the_python_binding(lib):
         assert getattr(info, name) == expected[key], name
 
     assert lib.mr_device_info(None, ctypes.byref(err)) == MR_ERROR_INVALID_ARGUMENT
+    assert err.value is not None
     assert b"out_info is null" in err.value
     lib.mr_free_error_message(err)
 
@@ -244,7 +244,6 @@ def test_pipeline_info_reports_the_simdgroup_width_and_kernel_limits(lib):
 
     info = MRPipelineInfo()
     err = ctypes.c_char_p()
-    assert err.value is not None
     status = lib.mr_pipeline_info(pipeline, ctypes.byref(info), ctypes.byref(err))
     assert status == MR_OK, err.value
 
@@ -258,6 +257,7 @@ def test_pipeline_info_reports_the_simdgroup_width_and_kernel_limits(lib):
 
     status = lib.mr_pipeline_info(None, ctypes.byref(info), ctypes.byref(err))
     assert status == MR_ERROR_INVALID_ARGUMENT
+    assert err.value is not None
     assert b"pipeline is null" in err.value
     lib.mr_free_error_message(err)
 
@@ -393,6 +393,31 @@ def test_missing_function_returns_function_not_found_status(lib):
     assert err.value
     lib.mr_free_error_message(err)
     lib.mr_release_library(library)
+
+
+def test_non_utf8_strings_return_invalid_argument_instead_of_aborting(lib):
+    """Metal asserts on the nil NSString that invalid UTF-8 converts to,
+    which would abort the host process."""
+    status, _, err = _compile(lib, b"#include <metal_stdlib>\n// \xff\n")
+    assert status == MR_ERROR_INVALID_ARGUMENT
+    assert b"MSL source is not valid UTF-8" in err.value
+    lib.mr_free_error_message(err)
+
+    status, library, err = _compile(lib, _ADD_ONE_SOURCE)
+    assert status == MR_OK, err.value
+    status, _, err = _get_pipeline(lib, library, b"add_one\xff")
+    assert status == MR_ERROR_INVALID_ARGUMENT
+    assert b"function name is not valid UTF-8" in err.value
+    lib.mr_free_error_message(err)
+    lib.mr_release_library(library)
+
+
+def test_embedded_nul_in_source_is_rejected_rather_than_truncated(lib):
+    """mr_compile_library takes a length, so a NUL is part of the source."""
+    status, _, err = _compile(lib, _ADD_ONE_SOURCE + b"\0trailing")
+    assert status == MR_ERROR_INVALID_ARGUMENT
+    assert b"NUL" in err.value
+    lib.mr_free_error_message(err)
 
 
 def test_repeated_compile_and_release_does_not_crash(lib):
@@ -663,7 +688,7 @@ def test_batch_add_encodes_many_launches_into_one_command_buffer(lib):
     lib.mr_release_buffer(buffer)
 
     err = ctypes.c_char_p()
-    assert err.value is not None
     assert lib.mr_batch_add(None, ctypes.byref(desc), ctypes.byref(err)) != MR_OK
+    assert err.value is not None
     assert b"batch is null" in err.value
     lib.mr_free_error_message(err)

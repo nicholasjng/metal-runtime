@@ -30,6 +30,7 @@ struct Dim3 {
 struct BindingInfo {
     size_t index;
     std::string name;
+    size_t data_size = 0;  // bytes per element of a buffer binding; 0 if unknown
 };
 
 class MR_API ComputePipeline {
@@ -113,6 +114,10 @@ class MR_API CommandBatch {
     // faulted command buffer. Every caller blocks, however many times.
     void wait();
 
+    // Drops an uncommitted command buffer now, freeing its queue slot; later
+    // add/commit/wait throw. A no-op once committed.
+    void discard();
+
     // Device-side execution seconds for the whole batch; set by wait().
     std::optional<double> gpu_time() const {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -127,6 +132,7 @@ class MR_API CommandBatch {
     NS::SharedPtr<MTL::ComputeCommandEncoder> encoder_;
     mutable std::mutex state_mutex_;
     bool committed_ = false;
+    bool discarded_ = false;
     bool non_uniform_ = false;
     size_t max_threadgroup_memory_ = 0;
     std::optional<double> gpu_time_;

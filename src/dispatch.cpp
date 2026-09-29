@@ -112,6 +112,20 @@ void validate(const Launch& launch, bool non_uniform, size_t max_threadgroup_mem
                                         "-byte setBytes limit; pass it as a Buffer instead");
         }
     }
+    // Reflection reports `constant T&` and `constant T*` alike, so a scalar
+    // may be an array of T, but anything narrower makes the kernel read past it.
+    for (const BindingInfo& binding : pipeline->buffer_bindings()) {
+        if (binding.index < launch.buffers.size() || binding.data_size == 0) continue;
+        size_t position = binding.index - launch.buffers.size();
+        size_t size = launch.scalars[position].size;
+        if (size < binding.data_size || size % binding.data_size != 0) {
+            throw std::invalid_argument(
+                "dispatch: scalars[" + std::to_string(position) + "] is " + std::to_string(size) +
+                " bytes, but kernel '" + pipeline->label() + "' declares '" + binding.name +
+                "' at buffer index " + std::to_string(binding.index) + " with " +
+                std::to_string(binding.data_size) + "-byte elements");
+        }
+    }
     for (size_t i = 0; i < launch.buffers.size(); ++i) {
         const auto& [buffer, offset] = launch.buffers[i];
         if (offset >= buffer->size() && !(offset == 0 && buffer->size() == 0)) {
@@ -164,6 +178,7 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
             if (!binding->isUsed()) continue;
             BindingInfo info{binding->index(), binding->name()->utf8String()};
             if (binding->type() == MTL::BindingTypeBuffer) {
+                info.data_size = ((MTL::BufferBinding*)binding)->bufferDataSize();
                 buffer_bindings_.push_back(std::move(info));
             } else if (binding->type() == MTL::BindingTypeThreadgroupMemory) {
                 threadgroup_bindings_.push_back(std::move(info));
@@ -220,8 +235,9 @@ CommandBatch::~CommandBatch() {
 
 void CommandBatch::add(const Launch& launch) {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (committed_) {
-        throw DispatchError("cannot add to a batch that has already been committed");
+    if (committed_ || discarded_) {
+        throw DispatchError(std::string("cannot add to a batch that has already been ") +
+                            (committed_ ? "committed" : "discarded"));
     }
     validate(launch, non_uniform_, max_threadgroup_memory_);
 
@@ -254,8 +270,9 @@ void CommandBatch::add(const Launch& launch) {
 
 void CommandBatch::barrier() {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (committed_) {
-        throw DispatchError("cannot add a barrier to a batch that has already been committed");
+    if (committed_ || discarded_) {
+        throw DispatchError(std::string("cannot add a barrier to a batch that has already been ") +
+                            (committed_ ? "committed" : "discarded"));
     }
     encoder_->memoryBarrier(MTL::BarrierScopeBuffers);
 }
@@ -266,6 +283,7 @@ void CommandBatch::commit() {
 }
 
 void CommandBatch::commit_locked() {
+    if (discarded_) throw DispatchError("this batch was discarded without being committed");
     if (committed_) return;
     committed_ = true;
 
@@ -293,6 +311,18 @@ void CommandBatch::wait() {
     if (command_buffer_->status() == MTL::CommandBufferStatusError) {
         throw DispatchError("kernel execution failed: " + describe(command_buffer_->error()));
     }
+}
+
+void CommandBatch::discard() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (committed_ || discarded_) return;
+    discarded_ = true;
+
+    // The queue counts uncommitted command buffers against its limit too.
+    AutoreleaseScope scope;
+    encoder_->endEncoding();
+    encoder_.reset();
+    command_buffer_.reset();
 }
 
 void dispatch(MetalRuntime& rt, const Launch& launch) {

@@ -70,7 +70,9 @@ with mr.Batch() as batch:
 
 `batch.commit()` is non-blocking, so a stepping loop can encode batch *n+1*
 while *n* executes. `mr.Batch(concurrent=True)` lets independent launches
-overlap on the GPU.
+overlap on the GPU. Metal's queue holds at most 64 command buffers, committed
+or not, so creating a 65th batch (or calling `run`) blocks until one
+completes or is dropped.
 
 **GPU capture.** Capture dispatches on the runtime's Metal device to an Xcode
 GPU trace document. The context manager stops capture even if the profiled

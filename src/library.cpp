@@ -56,8 +56,8 @@ MTL::CompileOptions* build_options(const CompileOptions& options) {
         keys.reserve(options.defines.size());
         values.reserve(options.defines.size());
         for (const auto& [name, value] : options.defines) {
-            keys.push_back(NS::String::string(name.c_str(), NS::UTF8StringEncoding));
-            values.push_back(NS::String::string(value.c_str(), NS::UTF8StringEncoding));
+            keys.push_back(to_ns_string(name, "preprocessor macro name"));
+            values.push_back(to_ns_string(value, "preprocessor macro value"));
         }
         mtl_options->setPreprocessorMacros(
             NS::Dictionary::dictionary(values.data(), keys.data(), values.size()));
@@ -214,7 +214,7 @@ Library::Library(MTL::Device* device, const std::string& msl_source, const Compi
     : device_(device) {
     AutoreleaseScope scope;
     NS::Error* error = nullptr;
-    NS::String* source = NS::String::string(msl_source.c_str(), NS::UTF8StringEncoding);
+    NS::String* source = to_ns_string(msl_source, "MSL source");
     library_ = NS::TransferPtr(device->newLibrary(source, build_options(options), &error));
     if (!library_) {
         throw MSLCompileError("MSL compile error: " + describe(error));
@@ -226,7 +226,7 @@ Library::~Library() = default;
 NS::SharedPtr<MTL::Function> Library::create_specialized(const std::string& name,
                                                          const FunctionConstants& constants) const {
     AutoreleaseScope scope;
-    NS::String* fn_name = NS::String::string(name.c_str(), NS::UTF8StringEncoding);
+    NS::String* fn_name = to_ns_string(name, "function name");
 
     NS::SharedPtr<MTL::Function> probe = NS::TransferPtr(library_->newFunction(fn_name));
     if (!probe) throw MSLFunctionNotFoundError("no such MSL function: " + name);
@@ -274,7 +274,7 @@ NS::SharedPtr<MTL::Function> Library::create_specialized(const std::string& name
         MTL::DataType type = declared.at(c.name).type;
         ConstantBytes bytes = coerce(c, type);
         values->setConstantValue(bytes.data(), type,
-                                 NS::String::string(c.name.c_str(), NS::UTF8StringEncoding));
+                                 to_ns_string(c.name, "function constant name"));
     }
     NS::Error* error = nullptr;
     NS::SharedPtr<MTL::Function> fn =

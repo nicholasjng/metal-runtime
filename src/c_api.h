@@ -113,6 +113,8 @@ MR_EXPORT MRStatus mr_dispatch(const MRLaunchDesc* launch, char** out_err_msg);
 // Launches in one command buffer: create, add each launch (the descriptor is
 // copied, so its arrays may change afterwards), commit, wait. Commit submits
 // without blocking. Releasing without waiting leaves faults unreported.
+// Metal's queue holds at most 64 command buffers, committed or not: past that,
+// mr_batch_create and mr_dispatch block until one completes or is released.
 MR_EXPORT MRStatus mr_batch_create(MRBatch** out_batch, char** out_err_msg);
 MR_EXPORT MRStatus mr_batch_add(MRBatch* batch, const MRLaunchDesc* launch, char** out_err_msg);
 MR_EXPORT MRStatus mr_batch_commit(MRBatch* batch, char** out_err_msg);

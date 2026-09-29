@@ -1,3 +1,6 @@
+import subprocess
+import sys
+import textwrap
 import threading
 
 import numpy as np
@@ -114,6 +117,12 @@ def test_invalid_msl_raises_compile_error():
 def test_missing_function_raises_function_not_found():
     with pytest.raises(mr.FunctionNotFoundError):
         mr.Kernel(_ADD_ONE_SOURCE, "no_such_kernel")
+
+
+def test_function_name_with_a_nul_is_rejected_rather_than_truncated():
+    """Truncated at the NUL, "add_one\\0x" would silently resolve to add_one."""
+    with pytest.raises(ValueError, match="function name contains a NUL byte"):
+        mr.Kernel(_ADD_ONE_SOURCE, "add_one\0x")
 
 
 def test_function_not_found_is_catchable_as_compile_error():
@@ -407,6 +416,35 @@ def test_oversized_inline_scalar_points_at_buffers():
         )
 
 
+def test_scalar_narrower_than_its_declaration_is_rejected():
+    """A uint8 bound to `constant uint&` makes the kernel read 3 bytes past it."""
+    with pytest.raises(ValueError, match=r"scalars\[1\] is 1 bytes.*'n'.*4-byte"):
+        mr.run(
+            mr.Kernel(_AXPY_SOURCE, "axpy"),
+            grid=4,
+            buffers=[mr.Buffer.zeros([4]), mr.Buffer.zeros([4])],
+            scalars=[np.float32(2.0), np.uint8(4)],
+        )
+
+
+def test_scalar_array_binds_to_a_constant_pointer():
+    """Reflection reports `constant float*` like `constant float&`, so a
+    whole-element multiple must still pass."""
+    source = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    kernel void gather(device float* out [[buffer(0)]], constant float* table [[buffer(1)]],
+                       uint tid [[thread_position_in_grid]]) {
+        out[tid] = table[tid];
+    }
+    """
+    out = mr.Buffer.zeros([4])
+    table = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    mr.run(mr.Kernel(source, "gather"), grid=4, buffers=[out], scalars=[table])
+    assert np.array_equal(out.to_numpy(), table)
+
+
 def test_too_many_bindings_is_rejected():
     kernel = mr.Kernel(_FILL_TID_SOURCE, "fill_tid")
     buffer = mr.Buffer.zeros([4])
@@ -469,6 +507,71 @@ def test_batch_wait_is_idempotent():
     batch.wait()
     batch.wait()
     assert np.array_equal(buffer.to_numpy(), np.ones(4, dtype=np.float32))
+
+
+def test_batch_discarded_by_an_exception_rejects_later_use():
+    kernel = mr.Kernel(_ADD_ONE_SOURCE, "add_one")
+    buffer = mr.Buffer.zeros([4])
+    with pytest.raises(ValueError), mr.Batch() as batch:
+        raise ValueError("boom")
+
+    for use in (
+        lambda: batch.add(kernel, grid=4, buffers=[buffer]),
+        batch.barrier,
+        batch.commit,
+        batch.wait,
+    ):
+        with pytest.raises(mr.DispatchError, match="discarded"):
+            use()
+
+
+def _run_isolated(script: str) -> None:
+    """Runs `script` in a fresh process: queue-limit tests must not count other
+    tests' batches, and a regression must time out rather than hang the suite."""
+    subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(script)], check=True, timeout=30
+    )
+
+
+def test_batches_discarded_by_exceptions_free_their_queue_slots():
+    """Metal's queue holds 64 command buffers, committed or not. A batch kept
+    alive past a raising body (by its `with` target or a traceback) must not
+    hold one, or the next launch blocks forever."""
+    _run_isolated(f"""
+        import metal_runtime as mr
+
+        kernel = mr.Kernel({_ADD_ONE_SOURCE!r}, "add_one")
+        buffer = mr.Buffer.zeros([4])
+        held = []
+        for _ in range(64):
+            try:
+                with mr.Batch() as batch:
+                    held.append(batch)
+                    raise ValueError("boom")
+            except ValueError:
+                pass
+        mr.run(kernel, grid=4, buffers=[buffer])
+        assert buffer.to_numpy().tolist() == [1.0] * 4
+    """)
+
+
+def test_batch_waiting_for_a_queue_slot_releases_the_gil():
+    """A 65th live batch waits for a slot; other threads must keep running,
+    or none of them could free one."""
+    _run_isolated("""
+        import threading
+        import time
+
+        import metal_runtime as mr
+
+        held = [mr.Batch() for _ in range(64)]
+        created = threading.Event()
+        threading.Thread(target=lambda: (mr.Batch(), created.set()), daemon=True).start()
+        time.sleep(0.2)
+        assert not created.is_set(), "the queue was not full"
+        held.pop()
+        assert created.wait(timeout=10)
+    """)
 
 
 @pytest.fixture
