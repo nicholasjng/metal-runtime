@@ -1,8 +1,12 @@
 #include "library.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "dispatch.h"
@@ -61,30 +65,23 @@ MTL::CompileOptions* build_options(const CompileOptions& options) {
 }
 
 // The scalar MSL types a function constant can have.
-struct TypeEntry {
+struct ConstantType {
     MTL::DataType mtl;
     DType dtype;
-    const char* msl_name;
 };
 
-constexpr TypeEntry kTypeTable[] = {
-    {MTL::DataTypeBool, {DType::Bool, 8}, "bool"},
-    {MTL::DataTypeChar, {DType::Int, 8}, "char"},
-    {MTL::DataTypeShort, {DType::Int, 16}, "short"},
-    {MTL::DataTypeInt, {DType::Int, 32}, "int"},
-    {MTL::DataTypeLong, {DType::Int, 64}, "long"},
-    {MTL::DataTypeUChar, {DType::UInt, 8}, "uchar"},
-    {MTL::DataTypeUShort, {DType::UInt, 16}, "ushort"},
-    {MTL::DataTypeUInt, {DType::UInt, 32}, "uint"},
-    {MTL::DataTypeULong, {DType::UInt, 64}, "ulong"},
-    {MTL::DataTypeHalf, {DType::Float, 16}, "half"},
-    {MTL::DataTypeFloat, {DType::Float, 32}, "float"},
-    {MTL::DataTypeBFloat, {DType::Bfloat, 16}, "bfloat"},
+constexpr ConstantType kConstantTypes[] = {
+    {MTL::DataTypeBool, {DType::Bool, 8}},    {MTL::DataTypeChar, {DType::Int, 8}},
+    {MTL::DataTypeShort, {DType::Int, 16}},   {MTL::DataTypeInt, {DType::Int, 32}},
+    {MTL::DataTypeLong, {DType::Int, 64}},    {MTL::DataTypeUChar, {DType::UInt, 8}},
+    {MTL::DataTypeUShort, {DType::UInt, 16}}, {MTL::DataTypeUInt, {DType::UInt, 32}},
+    {MTL::DataTypeULong, {DType::UInt, 64}},  {MTL::DataTypeHalf, {DType::Float, 16}},
+    {MTL::DataTypeFloat, {DType::Float, 32}}, {MTL::DataTypeBFloat, {DType::Bfloat, 16}},
 };
 
-const TypeEntry* type_entry(MTL::DataType t) {
-    for (const TypeEntry& entry : kTypeTable) {
-        if (entry.mtl == t) return &entry;
+const DType* constant_dtype(MTL::DataType t) {
+    for (const ConstantType& entry : kConstantTypes) {
+        if (entry.mtl == t) return &entry.dtype;
     }
     return nullptr;
 }
@@ -105,106 +102,84 @@ std::map<std::string, DeclaredConstant> read_declared(MTL::Function* fn) {
     return out;
 }
 
-// Coerces one provided constant to its declared MSL type.
-FunctionConstant coerce(const FunctionConstant& c, MTL::DataType declared) {
-    const TypeEntry* target = type_entry(declared);
+using ConstantBytes = std::array<uint8_t, 8>;
+
+template <typename T>
+ConstantBytes to_bytes(T value) {
+    ConstantBytes out{};
+    std::memcpy(out.data(), &value, sizeof(T));
+    return out;
+}
+
+// `v` as a T, or an error naming the declared type if it doesn't fit.
+template <typename T>
+ConstantBytes int_to_bytes(int64_t v, const std::string& name, const char* msl_name) {
+    bool fits;
+    if constexpr (std::is_signed_v<T>) {
+        fits = v >= std::numeric_limits<T>::min() && v <= std::numeric_limits<T>::max();
+    } else {
+        fits = v >= 0 && (uint64_t)v <= std::numeric_limits<T>::max();
+    }
+    if (!fits) {
+        throw MSLCompileError("function constant '" + name + "' = " + std::to_string(v) +
+                              " is out of range for declared type '" + msl_name + "'");
+    }
+    return to_bytes((T)v);
+}
+
+// The bytes of one provided constant, coerced to its declared MSL type.
+ConstantBytes coerce(const FunctionConstant& c, MTL::DataType declared) {
+    const DType* target = constant_dtype(declared);
     if (!target) {
         throw MSLCompileError(
             "function constant '" + c.name + "' has an unsupported MSL type (MTLDataType " +
             std::to_string((int)declared) + "); only scalar constants are supported");
     }
-    FunctionConstant out;
-    out.name = c.name;
-    out.kind = FunctionConstant::Kind::Exact;
-    out.dtype = target->dtype;
-
-    auto put = [&](auto typed) { std::memcpy(out.value.data(), &typed, sizeof(typed)); };
-    auto type_error = [&](const char* what, const std::string& hint = "") -> MSLCompileError {
-        return MSLCompileError("function constant '" + c.name + "' is declared as '" +
-                               target->msl_name + "', but the value is " + what + hint);
+    const char* msl_name = msl_type_name(*target);
+    auto type_error = [&](const std::string& what) {
+        return MSLCompileError("function constant '" + c.name + "' is declared as '" + msl_name +
+                               "', but the value is " + what);
     };
 
-    switch (c.kind) {
-        case FunctionConstant::Kind::Exact:
-            if (c.dtype != target->dtype) {
-                throw type_error(("a '" + std::string(dtype_name(c.dtype)) + "' scalar").c_str());
-            }
-            out.value = c.value;
-            return out;
-
-        case FunctionConstant::Kind::Bool:
-            if (declared != MTL::DataTypeBool) throw type_error("a Python bool");
-            put((uint8_t)(c.bool_value ? 1 : 0));
-            return out;
-
-        case FunctionConstant::Kind::Float:
-            if (declared != MTL::DataTypeFloat) {
-                std::string hint;
-                if (declared == MTL::DataTypeHalf) hint = "; pass numpy.float16(value)";
-                throw type_error("a Python float", hint);
-            }
-            put((float)c.float_value);
-            return out;
-
-        case FunctionConstant::Kind::Int: {
-            if (c.int_is_wide_unsigned) {
-                if (declared != MTL::DataTypeULong) {
-                    throw type_error(
-                        "a Python int too large for a signed 64-bit integer "
-                        "(fits only a 'ulong' constant)");
-                }
-                put((uint64_t)c.uint_value);
-                return out;
-            }
-            long long v = c.int_value;
-            auto in_range = [&](long long lo, long long hi) {
-                if (v < lo || v > hi) {
-                    throw MSLCompileError(
-                        "function constant '" + c.name + "' = " + std::to_string(v) +
-                        " is out of range for declared type '" + target->msl_name + "'");
-                }
-            };
-            switch (declared) {
-                case MTL::DataTypeChar:
-                    in_range(-128, 127);
-                    put((int8_t)v);
-                    return out;
-                case MTL::DataTypeShort:
-                    in_range(-32768, 32767);
-                    put((int16_t)v);
-                    return out;
-                case MTL::DataTypeInt:
-                    in_range(INT32_MIN, INT32_MAX);
-                    put((int32_t)v);
-                    return out;
-                case MTL::DataTypeLong:
-                    put((int64_t)v);
-                    return out;
-                case MTL::DataTypeUChar:
-                    in_range(0, 255);
-                    put((uint8_t)v);
-                    return out;
-                case MTL::DataTypeUShort:
-                    in_range(0, 65535);
-                    put((uint16_t)v);
-                    return out;
-                case MTL::DataTypeUInt:
-                    in_range(0, 4294967295LL);
-                    put((uint32_t)v);
-                    return out;
-                case MTL::DataTypeULong:
-                    in_range(0, INT64_MAX);
-                    put((uint64_t)v);
-                    return out;
-                case MTL::DataTypeFloat:
-                    put((float)v);
-                    return out;
-                default:
-                    throw type_error("a Python int");
-            }
+    if (const auto* exact = std::get_if<FunctionConstant::ExactScalar>(&c.value)) {
+        if (exact->dtype != *target) {
+            throw type_error("a '" + std::string(dtype_name(exact->dtype)) + "' scalar");
         }
+        return exact->bytes;
     }
-    throw std::logic_error("unreachable: unhandled FunctionConstant::Kind");
+    if (const bool* b = std::get_if<bool>(&c.value)) {
+        if (declared != MTL::DataTypeBool) throw type_error("a Python bool");
+        return to_bytes<uint8_t>(*b ? 1 : 0);
+    }
+    if (const double* f = std::get_if<double>(&c.value)) {
+        if (declared == MTL::DataTypeHalf)
+            throw type_error("a Python float; pass numpy.float16(value)");
+        if (declared != MTL::DataTypeFloat) throw type_error("a Python float");
+        return to_bytes((float)*f);
+    }
+    int64_t v = std::get<int64_t>(c.value);
+    switch (declared) {
+        case MTL::DataTypeChar:
+            return int_to_bytes<int8_t>(v, c.name, msl_name);
+        case MTL::DataTypeShort:
+            return int_to_bytes<int16_t>(v, c.name, msl_name);
+        case MTL::DataTypeInt:
+            return int_to_bytes<int32_t>(v, c.name, msl_name);
+        case MTL::DataTypeLong:
+            return int_to_bytes<int64_t>(v, c.name, msl_name);
+        case MTL::DataTypeUChar:
+            return int_to_bytes<uint8_t>(v, c.name, msl_name);
+        case MTL::DataTypeUShort:
+            return int_to_bytes<uint16_t>(v, c.name, msl_name);
+        case MTL::DataTypeUInt:
+            return int_to_bytes<uint32_t>(v, c.name, msl_name);
+        case MTL::DataTypeULong:
+            return int_to_bytes<uint64_t>(v, c.name, msl_name);
+        case MTL::DataTypeFloat:
+            return to_bytes((float)v);
+        default:
+            throw type_error("a Python int");
+    }
 }
 
 // Injective, like CompileOptions::cache_key.
@@ -212,27 +187,21 @@ std::string pipeline_key(const std::string& name, const FunctionConstants& const
     std::string key = std::to_string(name.size()) + ":" + name;
     for (const FunctionConstant& c : constants) {
         key += ";" + std::to_string(c.name.size()) + ":" + c.name + "=";
-        switch (c.kind) {
-            case FunctionConstant::Kind::Bool:
-                key += c.bool_value ? "B1" : "B0";
-                break;
-            case FunctionConstant::Kind::Int:
-                key += c.int_is_wide_unsigned ? "U" + std::to_string(c.uint_value)
-                                              : "I" + std::to_string(c.int_value);
-                break;
-            case FunctionConstant::Kind::Float: {
-                uint64_t bits;
-                std::memcpy(&bits, &c.float_value, sizeof(bits));
-                key += "F" + std::to_string(bits);
-                break;
+        if (const bool* b = std::get_if<bool>(&c.value)) {
+            key += *b ? "B1" : "B0";
+        } else if (const int64_t* i = std::get_if<int64_t>(&c.value)) {
+            key += "I" + std::to_string(*i);
+        } else if (const double* f = std::get_if<double>(&c.value)) {
+            uint64_t bits;
+            std::memcpy(&bits, f, sizeof(bits));
+            key += "F" + std::to_string(bits);
+        } else {
+            const auto& exact = std::get<FunctionConstant::ExactScalar>(c.value);
+            key += "E" + std::to_string((int)exact.dtype.code) + "." +
+                   std::to_string((int)exact.dtype.bits) + ":";
+            for (size_t i = 0; i < exact.dtype.itemsize(); ++i) {
+                key += std::to_string((int)exact.bytes[i]) + ",";
             }
-            case FunctionConstant::Kind::Exact:
-                key += "E" + std::to_string((int)c.dtype.code) + "." +
-                       std::to_string((int)c.dtype.bits) + ":";
-                for (size_t i = 0; i < c.dtype.itemsize(); ++i) {
-                    key += std::to_string((int)c.value[i]) + ",";
-                }
-                break;
         }
     }
     return key;
@@ -253,29 +222,13 @@ Library::Library(MTL::Device* device, const std::string& msl_source, const Compi
 
 Library::~Library() = default;
 
-bool Library::has_function(const std::string& name) const {
-    AutoreleaseScope scope;
-    NS::Array* names = library_->functionNames();
-    for (NS::UInteger i = 0; i < names->count(); ++i) {
-        auto* fn_name = (NS::String*)names->object(i);
-        if (name == fn_name->utf8String()) return true;
-    }
-    return false;
-}
-
 NS::SharedPtr<MTL::Function> Library::create_specialized(const std::string& name,
                                                          const FunctionConstants& constants) const {
     AutoreleaseScope scope;
     NS::String* fn_name = NS::String::string(name.c_str(), NS::UTF8StringEncoding);
 
     NS::SharedPtr<MTL::Function> probe = NS::TransferPtr(library_->newFunction(fn_name));
-    if (!probe) {
-        if (!has_function(name)) {
-            throw MSLFunctionNotFoundError("no such MSL function: " + name);
-        }
-        throw MSLCompileError("MSL function '" + name +
-                              "' exists but could not be created for constants reflection");
-    }
+    if (!probe) throw MSLFunctionNotFoundError("no such MSL function: " + name);
     std::map<std::string, DeclaredConstant> declared = read_declared(probe.get());
 
     // No constants declared, none provided: the probe *is* the function.
@@ -314,17 +267,12 @@ NS::SharedPtr<MTL::Function> Library::create_specialized(const std::string& name
         throw MSLCompileError(message);
     }
 
-    FunctionConstants coerced;
-    coerced.reserve(constants.size());
-    for (const FunctionConstant& c : constants) {
-        coerced.push_back(coerce(c, declared.at(c.name).type));
-    }
-
     MTL::FunctionConstantValues* values =
         MTL::FunctionConstantValues::alloc()->init()->autorelease();
-    for (const FunctionConstant& c : coerced) {
+    for (const FunctionConstant& c : constants) {
         MTL::DataType type = declared.at(c.name).type;
-        values->setConstantValue(c.value.data(), type,
+        ConstantBytes bytes = coerce(c, type);
+        values->setConstantValue(bytes.data(), type,
                                  NS::String::string(c.name.c_str(), NS::UTF8StringEncoding));
     }
     NS::Error* error = nullptr;

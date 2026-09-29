@@ -6,6 +6,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "dtype.h"
@@ -33,19 +34,17 @@ struct MR_API CompileOptions {
     std::string cache_key() const;
 };
 
-// One MSL function constant, baked in at pipeline build without recompiling the library.
+// One MSL function constant, baked in at pipeline build without recompiling the
+// library. bool, int64_t and double coerce to the declared type; an ExactScalar
+// (a numpy scalar) must match it.
 struct FunctionConstant {
-    enum class Kind : uint8_t { Bool, Int, Float, Exact };
+    struct ExactScalar {
+        DType dtype;
+        std::array<uint8_t, 8> bytes{};  // little-endian
+    };
 
     std::string name;
-    Kind kind = Kind::Exact;
-    bool bool_value = false;
-    long long int_value = 0;
-    unsigned long long uint_value = 0;  // used when int_value overflows (> INT64_MAX)
-    bool int_is_wide_unsigned = false;
-    double float_value = 0.0;
-    DType dtype{};                   // Exact only
-    std::array<uint8_t, 8> value{};  // Exact only: little-endian bytes
+    std::variant<bool, int64_t, double, ExactScalar> value;
 };
 using FunctionConstants = std::vector<FunctionConstant>;
 
@@ -74,8 +73,6 @@ class MR_API Library {
                                                   const FunctionConstants& constants = {});
 
    private:
-    bool has_function(const std::string& name) const;
-
     // Validates `constants` against reflection, then specializes.
     NS::SharedPtr<MTL::Function> create_specialized(const std::string& name,
                                                     const FunctionConstants& constants) const;
