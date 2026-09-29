@@ -233,22 +233,18 @@ FunctionConstants parse_constants(const nb::dict& constants) {
         c.name = nb::cast<std::string>(key);
         // bool before int: Python bools are ints.
         if (nb::isinstance<nb::bool_>(value)) {
-            c.kind = FunctionConstant::Kind::Bool;
-            c.bool_value = nb::cast<bool>(value);
+            c.value = nb::cast<bool>(value);
         } else if (nb::isinstance<nb::int_>(value)) {
-            c.kind = FunctionConstant::Kind::Int;
-            long long v;
-            if (nb::try_cast<long long>(value, v)) {
-                c.int_value = v;
-            } else if (nb::try_cast<unsigned long long>(value, c.uint_value)) {
-                c.int_is_wide_unsigned = true;
-            } else {
-                throw std::invalid_argument("function constant '" + c.name +
-                                            "' is out of range for a 64-bit integer");
+            int64_t v;
+            if (!nb::try_cast<int64_t>(value, v)) {
+                throw std::invalid_argument(
+                    "function constant '" + c.name +
+                    "' is out of range for a signed 64-bit integer; for a larger 'ulong' "
+                    "constant, pass numpy.uint64(value)");
             }
+            c.value = v;
         } else if (nb::isinstance<nb::float_>(value)) {
-            c.kind = FunctionConstant::Kind::Float;
-            c.float_value = nb::cast<double>(value);
+            c.value = nb::cast<double>(value);
         } else {
             HostArray scalar;
             if (!nb::try_cast<HostArray>(value, scalar) || scalar.size() != 1) {
@@ -256,9 +252,9 @@ FunctionConstants parse_constants(const nb::dict& constants) {
                     "function constant '" + c.name +
                     "' must be a bool, int, float, or a single numpy scalar");
             }
-            c.kind = FunctionConstant::Kind::Exact;
-            c.dtype = from_dlpack(scalar.dtype());
-            std::memcpy(c.value.data(), scalar.data(), c.dtype.itemsize());
+            FunctionConstant::ExactScalar exact{from_dlpack(scalar.dtype())};
+            std::memcpy(exact.bytes.data(), scalar.data(), exact.dtype.itemsize());
+            c.value = exact;
         }
         out.push_back(std::move(c));
     }

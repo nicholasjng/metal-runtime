@@ -890,24 +890,19 @@ kernel void report_big(device ulong* buf [[buffer(0)]]) {
 """
 
 
-def test_python_int_past_int64_max_specializes_a_ulong_constant():
-    """Only a `ulong` constant can hold a Python int past INT64_MAX."""
+def test_numpy_uint64_past_int64_max_specializes_a_ulong_constant():
     big = 2**64 - 1
     buffer = mr.Buffer.zeros([1], dtype="uint64")
-    kernel = mr.Kernel(_ULONG_CONSTANT_SOURCE, "report_big", constants={"BIG": big})
+    kernel = mr.Kernel(
+        _ULONG_CONSTANT_SOURCE, "report_big", constants={"BIG": np.uint64(big)}
+    )
     mr.run(kernel, grid=1, buffers=[buffer])
     assert buffer.to_numpy()[0] == big
 
 
-def test_python_int_past_int64_max_rejected_for_non_ulong_constant():
-    with pytest.raises(
-        mr.CompileError, match="declared as 'uint'.*fits only a 'ulong'"
-    ):
-        mr.Kernel(
-            _CONSTANTS_SOURCE,
-            "scaled",
-            constants={"SCALE": 1.0, "N": 2**64 - 1, "NEGATE": False},
-        )
+def test_python_int_past_int64_max_points_at_numpy_uint64():
+    with pytest.raises(ValueError, match="numpy.uint64"):
+        mr.Kernel(_ULONG_CONSTANT_SOURCE, "report_big", constants={"BIG": 2**64 - 1})
 
 
 _OPTIONAL_CONSTANT_SOURCE = """

@@ -7,22 +7,17 @@ namespace {
 
 struct Entry {
     const char* name;
+    const char* msl_name;
     DType dtype;
 };
 
 constexpr Entry kEntries[] = {
-    {"bool", {DType::Bool, 8}},       // bool
-    {"int8", {DType::Int, 8}},        // char
-    {"int16", {DType::Int, 16}},      // short
-    {"int32", {DType::Int, 32}},      // int
-    {"int64", {DType::Int, 64}},      // long
-    {"uint8", {DType::UInt, 8}},      // uchar
-    {"uint16", {DType::UInt, 16}},    // ushort
-    {"uint32", {DType::UInt, 32}},    // uint
-    {"uint64", {DType::UInt, 64}},    // ulong
-    {"float16", {DType::Float, 16}},  // half
-    {"float32", {DType::Float, 32}},  // float
-    {"bfloat16", {DType::Bfloat, 16}},
+    {"bool", "bool", {DType::Bool, 8}},       {"int8", "char", {DType::Int, 8}},
+    {"int16", "short", {DType::Int, 16}},     {"int32", "int", {DType::Int, 32}},
+    {"int64", "long", {DType::Int, 64}},      {"uint8", "uchar", {DType::UInt, 8}},
+    {"uint16", "ushort", {DType::UInt, 16}},  {"uint32", "uint", {DType::UInt, 32}},
+    {"uint64", "ulong", {DType::UInt, 64}},   {"float16", "half", {DType::Float, 16}},
+    {"float32", "float", {DType::Float, 32}}, {"bfloat16", "bfloat", {DType::Bfloat, 16}},
 };
 
 }  // namespace
@@ -43,6 +38,13 @@ DType dtype_from_name(const std::string& name) {
 const char* dtype_name(DType dt) {
     for (const Entry& entry : kEntries) {
         if (dt == entry.dtype) return entry.name;
+    }
+    return nullptr;
+}
+
+const char* msl_type_name(DType dt) {
+    for (const Entry& entry : kEntries) {
+        if (dt == entry.dtype) return entry.msl_name;
     }
     return nullptr;
 }

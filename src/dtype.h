@@ -23,5 +23,8 @@ MR_API DType dtype_from_name(const std::string& name);
 // nullptr if `dt` isn't a dtype this runtime supports.
 MR_API const char* dtype_name(DType dt);
 
+// The MSL spelling, e.g. "uint" for uint32; nullptr if unsupported.
+const char* msl_type_name(DType dt);
+
 // Comma-separated, for error messages.
 MR_API std::string supported_dtype_names();
