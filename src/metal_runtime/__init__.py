@@ -15,21 +15,17 @@ from metal_runtime._core import (
     PipelineBuildError,
     clear_library_cache,
     device_info,
-    device_name,
     is_capturing,
-    library_cache_limit,
     library_cache_size,
     run,
     set_library_cache_limit,
     start_capture,
     stop_capture,
-    supported_dtypes,
 )
 from metal_runtime.source import (
     DEFAULT_INCLUDES,
     Fragment,
     assemble,
-    build_source,
 )
 
 __all__ = [
@@ -49,18 +45,14 @@ __all__ = [
     "PipelineBuildError",
     "__version__",
     "assemble",
-    "build_source",
     "clear_library_cache",
     "device_info",
-    "device_name",
     "is_capturing",
-    "library_cache_limit",
     "library_cache_size",
     "run",
     "set_library_cache_limit",
     "start_capture",
     "stop_capture",
-    "supported_dtypes",
 ]
 
 __version__ = "0.1.0"

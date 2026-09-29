@@ -33,7 +33,6 @@ class LruCache {
         limit_ = limit;
         evict();
     }
-    size_t limit() const { return limit_; }
     size_t size() const { return entries_.size(); }
     void clear() {
         entries_.clear();

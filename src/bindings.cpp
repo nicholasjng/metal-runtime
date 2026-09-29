@@ -265,26 +265,18 @@ class PyKernel {
    public:
     PyKernel(const std::string& msl_source, const std::string& function_name, MathMode math_mode,
              const std::map<std::string, std::string>& defines, const nb::dict& constants)
-        : options_{math_mode, defines},
-          library_(runtime().library_for(msl_source, options_)),
-          pipeline_(library_->pipeline_for(function_name, parse_constants(constants))),
-          function_name_(function_name) {
-        for (auto [key, value] : constants) constants_[key] = value;
-    }
+        : math_mode_(math_mode),
+          library_(runtime().library_for(msl_source, CompileOptions{math_mode, defines})),
+          pipeline_(library_->pipeline_for(function_name, parse_constants(constants))) {}
 
-    MathMode math_mode() const { return options_.math_mode; }
-    const std::map<std::string, std::string>& defines() const { return options_.defines; }
-    const nb::dict& constants() const { return constants_; }
-
+    MathMode math_mode() const { return math_mode_; }
     ComputePipeline& pipeline() { return *pipeline_; }
-    const std::string& function_name() const { return function_name_; }
+    const std::string& function_name() const { return pipeline_->label(); }
 
    private:
-    CompileOptions options_;            // initialized before library_ reads it
+    MathMode math_mode_;
     std::shared_ptr<Library> library_;  // held: the library cache evicts
     std::shared_ptr<ComputePipeline> pipeline_;
-    std::string function_name_;
-    nb::dict constants_;
 };
 
 // A Launch plus the Python objects it points into, pinned because dispatch
@@ -471,15 +463,6 @@ CaptureError
         "is_capturing", []() { return runtime().is_capturing(); },
         "Whether a Metal trace capture is currently active in this process.");
 
-    m.def(
-        "device_name", []() { return runtime().device_name(); },
-        R"doc(
-Name of the default Metal device.
-
-Returns
--------
-str
-)doc");
     m.def("device_info", &device_info,
           R"doc(
 Device capabilities and limits.
@@ -491,15 +474,6 @@ dict
     max_threads_per_threadgroup, max_threadgroup_memory_length,
     max_buffer_length, supports_non_uniform_threadgroups.
 )doc");
-    m.def("supported_dtypes", &supported_dtype_names,
-          R"doc(
-Comma-separated list of dtype names Buffer accepts.
-
-Returns
--------
-str
-)doc");
-
     m.def(
         "library_cache_size", []() { return runtime().library_cache_size(); },
         R"doc(
@@ -508,16 +482,6 @@ Number of compiled MSL libraries currently cached.
 Returns
 -------
 int
-)doc");
-    m.def(
-        "library_cache_limit", []() { return runtime().library_cache_limit(); },
-        R"doc(
-Current cap on cached libraries.
-
-Returns
--------
-int
-    0 means unlimited.
 )doc");
     m.def(
         "set_library_cache_limit", [](size_t limit) { runtime().set_library_cache_limit(limit); },
@@ -698,10 +662,6 @@ FunctionNotFoundError
 )doc")
         .def_prop_ro("function_name", &PyKernel::function_name, "Entry point name.")
         .def_prop_ro("math_mode", &PyKernel::math_mode, "Compiled math mode.")
-        .def_prop_ro("defines", &PyKernel::defines,
-                     "Preprocessor macros this kernel compiled with.")
-        .def_prop_ro("constants", &PyKernel::constants,
-                     "Function constant values this kernel was specialized with.")
         .def_prop_ro(
             "max_threads_per_threadgroup",
             [](PyKernel& k) { return k.pipeline().max_threads_per_threadgroup(); },

@@ -60,11 +60,6 @@ void MetalRuntime::set_library_cache_limit(size_t limit) {
     libraries_.set_limit(limit);
 }
 
-size_t MetalRuntime::library_cache_limit() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return libraries_.limit();
-}
-
 size_t MetalRuntime::library_cache_size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return libraries_.size();
