@@ -44,7 +44,7 @@ class MRLaunchDesc(ctypes.Structure):
 
 @pytest.fixture(scope="module")
 def lib():
-    path = os.path.join(c_api.library_dir(), "libmetal_runtime_c.dylib")
+    path = os.path.join(c_api.library_dir(), "libmetal_runtime.dylib")
     handle = ctypes.CDLL(path)
 
     handle.mr_free_error_message.argtypes = [ctypes.c_char_p]

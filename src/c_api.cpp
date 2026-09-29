@@ -44,7 +44,7 @@ void set_error(char** out_err_msg, const std::string& message) {
     std::memcpy(*out_err_msg, message.c_str(), message.size() + 1);
 }
 
-// One AutoreleaseScope per call, one exception-to-MRStatus mapping.
+// Maps exceptions to MRStatus.
 template <typename Fn>
 MRStatus mr_guard(char** out_err_msg, Fn&& fn) {
     AutoreleaseScope scope;
@@ -76,9 +76,6 @@ MRStatus mr_guard(char** out_err_msg, Fn&& fn) {
 }
 
 // True if every byte of [start, start + length) lies in one mapped, r+w VM region.
-// Page-rounding a caller-supplied pointer can grow the wrapped range past
-// what the caller actually owns - this is what keeps that growth from reaching
-// into unmapped memory before handing the range to Metal.
 bool region_is_mapped_rw(void* start, size_t length) {
     if (length == 0) return true;
     mach_vm_address_t queried = (mach_vm_address_t)(uintptr_t)start;
@@ -92,9 +89,7 @@ bool region_is_mapped_rw(void* start, size_t length) {
                        (vm_region_info_t)&info, &info_count, &object_name);
     if (object_name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object_name);
     if (kr != KERN_SUCCESS) return false;
-    // mach_vm_region rounds `addr` up to the next mapped region when the
-    // queried address itself falls in an unmapped hole.
-    // If it moved, `start` was never mapped in the first place.
+    // mach_vm_region moves `addr` forward when the query falls in a hole.
     if (addr > queried) return false;
     if (!(info.protection & VM_PROT_READ) || !(info.protection & VM_PROT_WRITE)) return false;
     mach_vm_size_t offset = queried - addr;
@@ -156,13 +151,6 @@ MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, cha
         }
 
         if (size_bytes > 0) {
-            // Round [ptr, ptr + size_bytes) out to enclosing page boundaries:
-            // newBufferWithBytesNoCopy (Buffer's external-ptr constructor) requires
-            // both page-exact, which real allocations almost never are.
-            // The true data starts `offset` bytes into the wrapped region;
-            // `mr_dispatch` adds that back in via `external_offset`, so callers
-            // never see it. Falls back to an owned copy if the rounded range would
-            // reach outside ptr's actual mapping.
             size_t page_size = (size_t)getpagesize();
             uintptr_t addr = (uintptr_t)ptr;
             uintptr_t page_start = addr & ~(uintptr_t)(page_size - 1);
@@ -197,7 +185,6 @@ MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, cha
 MRStatus mr_buffer_flush_to(MRBuffer* buffer, char** out_err_msg) {
     return mr_guard(out_err_msg, [&] {
         if (!buffer) throw std::invalid_argument("mr_buffer_flush_to: buffer is null");
-        // Zero-copy (page-exact or page-rounded): nothing to sync back.
         if (!buffer->owns_copy) return;
         if (buffer->buffer.size() > 0) {
             std::memcpy(buffer->external_ptr, buffer->buffer.contents(), buffer->buffer.size());
@@ -209,8 +196,7 @@ void mr_release_buffer(MRBuffer* buffer) { delete buffer; }
 
 namespace {
 
-// Shared by mr_dispatch/mr_dispatch_async; `who` names the entry point in
-// error messages.
+// `who` names the entry point in error messages.
 Launch build_launch(const MRLaunchDesc* launch_desc, const char* who) {
     if (!launch_desc) throw std::invalid_argument(std::string(who) + ": launch is null");
     if (!launch_desc->pipeline)
@@ -277,12 +263,12 @@ Launch build_launch(const MRLaunchDesc* launch_desc, const char* who) {
 MRStatus mr_dispatch(const MRLaunchDesc* launch_desc, char** out_err_msg) {
     return mr_guard(out_err_msg, [&] {
         Launch launch = build_launch(launch_desc, "mr_dispatch");
-        dispatch(runtime().queue(), launch);
+        dispatch(runtime(), launch);
     });
 }
 
 struct MRBatch {
-    explicit MRBatch(MTL::CommandQueue* queue) : batch(queue) {}
+    explicit MRBatch(MetalRuntime& rt) : batch(rt) {}
     CommandBatch batch;
 };
 
@@ -292,7 +278,7 @@ MRStatus mr_dispatch_async(const MRLaunchDesc* launch_desc, MRBatch** out_batch,
     return mr_guard(out_err_msg, [&] {
         if (!out_batch) throw std::invalid_argument("mr_dispatch_async: out_batch is null");
         Launch launch = build_launch(launch_desc, "mr_dispatch_async");
-        auto handle = std::make_unique<MRBatch>(runtime().queue());
+        auto handle = std::make_unique<MRBatch>(runtime());
         handle->batch.add(launch);
         handle->batch.commit();
         *out_batch = handle.release();

@@ -1,7 +1,4 @@
-"""Locates the C-linkable FFI bridge (libmetal_runtime_c + c_api.h) shipped
-in this package, for a build system to compile and link against directly.
-Same role as `jax.ffi.include_dir()`.
-"""
+"""Locations of the shipped C API (c_api.h, libmetal_runtime.dylib)."""
 
 import importlib.resources
 import pathlib
@@ -20,5 +17,5 @@ def include_dir() -> str:
 
 
 def library_dir() -> str:
-    """Directory containing libmetal_runtime_c.dylib."""
-    return _resolved_parent("metal_runtime", "libmetal_runtime_c.dylib")
+    """Directory containing libmetal_runtime.dylib."""
+    return _resolved_parent("metal_runtime", "libmetal_runtime.dylib")

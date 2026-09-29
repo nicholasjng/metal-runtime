@@ -1,14 +1,17 @@
-// C-linkable entry point into metal-runtime's dispatch, for callers without
-// Python or the GIL (e.g. an XLA FFI custom-call handler).
-// Mirrors dispatch.h's Library/ComputePipeline/Buffer/dispatch(), flattened to
-// opaque handles and POD structs. No C++ or Objective-C types in signatures.
+// C entry point into metal-runtime for callers without Python or the GIL,
+// such as an XLA FFI handler. Opaque handles and POD structs only.
 //
-// Ownership: compile once (mr_compile_library + mr_get_pipeline) at
-// registration time, hold the handle for the process lifetime, release once
-// at teardown. Per-call code (mr_wrap_buffer/mr_dispatch) never releases.
+// Compile once (mr_compile_library + mr_get_pipeline), hold the handles for
+// the process lifetime, release at teardown.
 #pragma once
 
 #include <stddef.h>
+
+#if defined(__GNUC__)
+#define MR_EXPORT __attribute__((visibility("default")))
+#else
+#define MR_EXPORT
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,57 +33,44 @@ typedef enum MRStatus {
     MR_ERROR_ALLOCATION = 7,
 } MRStatus;
 
-// Mirrors library.h's MathMode. Metal's default (FAST) permits reassociation,
-// which deletes compensated-arithmetic error terms (df32);
-// SAFE is required for those.
+// Mirrors library.h's MathMode. FAST (Metal's default) permits reassociation;
+// compensated arithmetic needs SAFE.
 typedef enum MRMathMode {
     MR_MATH_MODE_SAFE = 0,
     MR_MATH_MODE_RELAXED = 1,
     MR_MATH_MODE_FAST = 2,
 } MRMathMode;
 
-// No-op on NULL. *out_err_msg is untouched on success everywhere below.
-void mr_free_error_message(char* msg);
+// No-op on NULL. Every *out_err_msg below is untouched on success.
+MR_EXPORT void mr_free_error_message(char* msg);
 
-// Compiles MSL source. Call once at registration time. Part of the
-// library identity: the same source under a different math_mode is a
-// different library, matching library.h's own CompileOptions contract.
-MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len, MRMathMode math_mode,
-                            MRLibrary** out_library, char** out_err_msg);
-void mr_release_library(MRLibrary* library);
+// Compiles MSL source.
+MR_EXPORT MRStatus mr_compile_library(const char* msl_source, size_t msl_source_len,
+                                      MRMathMode math_mode, MRLibrary** out_library,
+                                      char** out_err_msg);
+MR_EXPORT void mr_release_library(MRLibrary* library);
 
 // Builds (and caches) the named kernel's pipeline.
-MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name, MRPipeline** out_pipeline,
-                         char** out_err_msg);
-void mr_release_pipeline(MRPipeline* pipeline);
+MR_EXPORT MRStatus mr_get_pipeline(MRLibrary* library, const char* function_name,
+                                   MRPipeline** out_pipeline, char** out_err_msg);
+MR_EXPORT void mr_release_pipeline(MRPipeline* pipeline);
 
-// Wraps `ptr` for use in mr_dispatch. Zero-copy for any `ptr`/`size_bytes`,
-// not just page-aligned ones: rounds the range out to the enclosing page
-// boundaries (newBufferWithBytesNoCopy's hard requirement) and dispatch
-// binds at the true data offset within that rounded region automatically.
-// Falls back to an owned copy, synced back by mr_buffer_flush_to, only if
-// the rounded range would reach outside ptr's actual VM mapping (checked
-// via mach_vm_region before ever handing memory to Metal). Caller keeps
-// owning `ptr`; this never frees it.
-// Dispatch offsets are checked against size_bytes, excluding page padding.
-// Unrepresentable address ranges are rejected as MR_ERROR_INVALID_ARGUMENT.
-//
-// Real xla::ffi::Buffer<F32> pointers were measured page-aligned on neither
-// `ptr` nor `size_bytes`, so page-rounding is the path that actually matters,
-// not an edge case.
-MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer, char** out_err_msg);
+// Wraps `ptr` for mr_dispatch without copying: the range is rounded out to
+// page boundaries (a Metal requirement) and dispatch binds at the true
+// offset. Falls back to an owned copy, synced back by mr_buffer_flush_to,
+// only if the rounded range would leave ptr's VM mapping. The caller keeps
+// owning `ptr`.
+MR_EXPORT MRStatus mr_wrap_buffer(void* ptr, size_t size_bytes, MRBuffer** out_buffer,
+                                  char** out_err_msg);
 
-// Copies the buffer's contents back to `ptr`. No-op if the wrap was
-// zero-copy. Call after mr_dispatch, before reading `ptr` again.
-MRStatus mr_buffer_flush_to(MRBuffer* buffer, char** out_err_msg);
+// Copies the contents back to `ptr` after a dispatch. No-op for a zero-copy wrap.
+MR_EXPORT MRStatus mr_buffer_flush_to(MRBuffer* buffer, char** out_err_msg);
 
 // Releases the handle. Never frees the pointer passed to mr_wrap_buffer.
-void mr_release_buffer(MRBuffer* buffer);
+MR_EXPORT void mr_release_buffer(MRBuffer* buffer);
 
-// One kernel launch, flattened from dispatch.h's Launch. buffers/
-// buffer_offsets and scalars/scalar_sizes are parallel arrays of
-// buffer_count/scalar_count length. threadgroup_x == 0 picks a default via
-// ComputePipeline::default_threadgroup.
+// One kernel launch. buffers/buffer_offsets and scalars/scalar_sizes are
+// parallel arrays. threadgroup_x == 0 picks a default threadgroup.
 typedef struct MRLaunchDesc {
     MRPipeline* pipeline;
     MRBuffer* const* buffers;
@@ -95,23 +85,19 @@ typedef struct MRLaunchDesc {
     size_t threadgroup_x, threadgroup_y, threadgroup_z;
 } MRLaunchDesc;
 
-// Encodes and synchronously waits on one launch (dispatch.h's dispatch(),
-// not CommandBatch: one Launch per FFI call).
-MRStatus mr_dispatch(const MRLaunchDesc* launch, char** out_err_msg);
+// Encodes one launch and waits for it.
+MR_EXPORT MRStatus mr_dispatch(const MRLaunchDesc* launch, char** out_err_msg);
 
-// Encodes and submits one launch without blocking, so several launches can
-// overlap on the GPU queue (the fixed per-dispatch cost is queue latency
-// that amortizes across in-flight batches). On MR_OK, *out_batch owns the
-// in-flight work: mr_batch_wait blocks until it completes, mr_release_batch
-// frees the handle. Releasing without waiting is allowed; the submitted
-// work still runs, but faults go unreported.
-MRStatus mr_dispatch_async(const MRLaunchDesc* launch, MRBatch** out_batch, char** out_err_msg);
+// Encodes and submits one launch without blocking. On MR_OK, *out_batch owns
+// the in-flight work: mr_batch_wait blocks on it, mr_release_batch frees the
+// handle. Releasing without waiting leaves faults unreported.
+MR_EXPORT MRStatus mr_dispatch_async(const MRLaunchDesc* launch, MRBatch** out_batch,
+                                     char** out_err_msg);
 
-// Blocks until the batch completes. Safe to call repeatedly and from
-// multiple threads. Reports a faulted command buffer as MR_ERROR_DISPATCH.
-MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg);
+// Blocks until the batch completes; a faulted command buffer is MR_ERROR_DISPATCH.
+MR_EXPORT MRStatus mr_batch_wait(MRBatch* batch, char** out_err_msg);
 
-void mr_release_batch(MRBatch* batch);
+MR_EXPORT void mr_release_batch(MRBatch* batch);
 
 #ifdef __cplusplus
 }  // extern "C"
