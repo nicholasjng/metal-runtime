@@ -1,6 +1,5 @@
 #pragma once
 #include <cstddef>
-#include <stdexcept>
 
 #include "export.h"
 #include "ns_ptr.h"
@@ -9,11 +8,6 @@ namespace MTL {
 class Device;
 class Buffer;
 }  // namespace MTL
-
-// Metal refused to allocate or wrap memory. MemoryError in Python.
-struct MR_API AllocationError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
 
 // Shared storage: host and GPU read and write the same bytes.
 class MR_API Buffer {

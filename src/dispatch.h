@@ -2,7 +2,6 @@
 #include <cstddef>
 #include <mutex>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -20,16 +19,6 @@ class Function;
 }  // namespace MTL
 
 class MetalRuntime;
-
-// The GPU rejected or aborted a committed command buffer.
-struct MR_API DispatchError : std::runtime_error {
-    using std::runtime_error::runtime_error;
-};
-
-// newComputePipelineState failed: the source compiled, the back end for this GPU did not.
-struct MR_API PipelineBuildError : MSLCompileError {
-    using MSLCompileError::MSLCompileError;
-};
 
 // A 1-, 2- or 3-dimensional extent; unused dimensions are 1.
 struct Dim3 {

@@ -16,6 +16,7 @@
 
 #include "buffer.h"
 #include "dispatch.h"
+#include "errors.h"
 #include "library.h"
 #include "metal.h"
 #include "runtime.h"

@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "errors.h"
 #include "metal.h"
 
 // newBuffer(0) returns nullptr; empty buffers get one byte.

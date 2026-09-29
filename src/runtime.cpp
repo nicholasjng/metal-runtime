@@ -1,5 +1,9 @@
 #include "runtime.h"
 
+#include <stdexcept>
+#include <string>
+
+#include "errors.h"
 #include "metal.h"
 
 MetalRuntime::MetalRuntime() : device_(NS::TransferPtr(MTL::CreateSystemDefaultDevice())) {

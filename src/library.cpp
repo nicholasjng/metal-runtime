@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "dispatch.h"
+#include "errors.h"
 #include "metal.h"
 
 std::string CompileOptions::cache_key() const {
