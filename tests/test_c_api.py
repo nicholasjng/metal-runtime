@@ -101,6 +101,20 @@ def lib():
 
     handle.mr_release_batch.argtypes = [ctypes.c_void_p]
 
+    handle.mr_batch_create.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    handle.mr_batch_create.restype = ctypes.c_int
+    handle.mr_batch_add.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(MRLaunchDesc),
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    handle.mr_batch_add.restype = ctypes.c_int
+    handle.mr_batch_commit.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p)]
+    handle.mr_batch_commit.restype = ctypes.c_int
+
     handle.mr_release_buffer.argtypes = [ctypes.c_void_p]
     handle.mr_release_pipeline.argtypes = [ctypes.c_void_p]
     handle.mr_release_library.argtypes = [ctypes.c_void_p]
@@ -496,3 +510,66 @@ def test_zero_length_wrap_still_accepts_zero_offset(lib):
         lib.mr_release_buffer(buffer)
         lib.mr_release_pipeline(pipeline)
         lib.mr_release_library(library)
+
+
+def test_batch_add_encodes_many_launches_into_one_command_buffer(lib):
+    """mr_batch_create/add/commit/wait: the descriptor is copied on add, so
+    one descriptor whose offsets are rewritten between adds partitions a
+    buffer exactly like separate async dispatches would."""
+    n_per_launch, n_launches = 256, 16
+    status, library, err = _compile(lib, _ADD_ONE_SOURCE)
+    assert status == MR_OK, err.value
+    status, pipeline, err = _get_pipeline(lib, library, b"add_one")
+    assert status == MR_OK, err.value
+
+    data = np.arange(n_per_launch * n_launches, dtype=np.float32)
+    buffer = ctypes.c_void_p()
+    err = ctypes.c_char_p()
+    status = lib.mr_wrap_buffer(
+        data.ctypes.data_as(ctypes.c_void_p),
+        data.nbytes,
+        ctypes.byref(buffer),
+        ctypes.byref(err),
+    )
+    assert status == MR_OK, err.value
+
+    buffers_arr = (ctypes.c_void_p * 1)(buffer)
+    offsets_arr = (ctypes.c_size_t * 1)(0)
+    desc = MRLaunchDesc()
+    desc.pipeline = pipeline
+    desc.buffers = buffers_arr
+    desc.buffer_offsets = offsets_arr
+    desc.buffer_count = 1
+    desc.scalar_count = 0
+    desc.threadgroup_memory_count = 0
+    desc.grid_x, desc.grid_y, desc.grid_z = n_per_launch, 1, 1
+    desc.threadgroup_x, desc.threadgroup_y, desc.threadgroup_z = 0, 0, 0
+
+    batch = ctypes.c_void_p()
+    err = ctypes.c_char_p()
+    assert lib.mr_batch_create(ctypes.byref(batch), ctypes.byref(err)) == MR_OK, (
+        err.value
+    )
+    for launch_index in range(n_launches):
+        offsets_arr[0] = launch_index * n_per_launch * 4
+        err = ctypes.c_char_p()
+        assert (
+            lib.mr_batch_add(batch, ctypes.byref(desc), ctypes.byref(err)) == MR_OK
+        ), err.value
+    err = ctypes.c_char_p()
+    assert lib.mr_batch_commit(batch, ctypes.byref(err)) == MR_OK, err.value
+    err = ctypes.c_char_p()
+    assert lib.mr_batch_wait(batch, ctypes.byref(err)) == MR_OK, err.value
+    lib.mr_release_batch(batch)
+
+    err = ctypes.c_char_p()
+    assert lib.mr_buffer_flush_to(buffer, ctypes.byref(err)) == MR_OK, err.value
+    np.testing.assert_array_equal(
+        data, np.arange(n_per_launch * n_launches, dtype=np.float32) + 1.0
+    )
+    lib.mr_release_buffer(buffer)
+
+    err = ctypes.c_char_p()
+    assert lib.mr_batch_add(None, ctypes.byref(desc), ctypes.byref(err)) != MR_OK
+    assert b"batch is null" in err.value
+    lib.mr_free_error_message(err)
