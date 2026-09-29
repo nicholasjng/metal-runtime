@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "export.h"
+#include "ns_ptr.h"
 
 namespace MTL {
 class Device;
@@ -32,9 +33,9 @@ class MR_API Buffer {
 
     // Requested size; an empty buffer reports 0.
     size_t size() const { return size_; }
-    MTL::Buffer* handle() const { return buffer_; }
+    MTL::Buffer* handle() const { return buffer_.get(); }
 
    private:
-    MTL::Buffer* buffer_ = nullptr;
+    NS::SharedPtr<MTL::Buffer> buffer_;
     size_t size_ = 0;
 };

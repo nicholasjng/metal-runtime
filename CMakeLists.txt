@@ -42,8 +42,6 @@ endif()
 add_library(metal-cpp INTERFACE)
 target_include_directories(metal-cpp INTERFACE "${METAL_CPP_INCLUDE}")
 target_compile_definitions(metal-cpp INTERFACE METALCPP_SYMBOL_VISIBILITY_HIDDEN)
-target_link_libraries(metal-cpp INTERFACE
-  "-framework Foundation" "-framework Metal")
 
 # One shared library: runtime, metal-cpp implementation, and the C API. The
 # Python extension links against it, so a process hosting both (e.g. an XLA
@@ -57,7 +55,9 @@ add_library(metal_runtime SHARED
   src/dispatch.cpp
   src/c_api.cpp)
 target_include_directories(metal_runtime PUBLIC src)   # so #include "runtime.h" resolves
-target_link_libraries(metal_runtime PRIVATE metal-cpp)
+target_link_libraries(metal_runtime
+  PUBLIC metal-cpp  # headers hold NS::SharedPtr members
+  PRIVATE "-framework Foundation" "-framework Metal")
 set_target_properties(metal_runtime PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON

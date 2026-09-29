@@ -245,16 +245,14 @@ Library::Library(MTL::Device* device, const std::string& msl_source, const Compi
     AutoreleaseScope scope;
     NS::Error* error = nullptr;
     NS::String* source = NS::String::string(msl_source.c_str(), NS::UTF8StringEncoding);
-    library_ = device->newLibrary(source, build_options(options), &error);
+    library_ = NS::TransferPtr(device->newLibrary(source, build_options(options), &error));
     if (!library_) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
         throw MSLCompileError("MSL compile error: " + message);
     }
 }
 
-Library::~Library() {
-    if (library_) library_->release();
-}
+Library::~Library() = default;
 
 bool Library::has_function(const std::string& name) const {
     AutoreleaseScope scope;
@@ -266,12 +264,12 @@ bool Library::has_function(const std::string& name) const {
     return false;
 }
 
-MTL::Function* Library::create_specialized(const std::string& name,
-                                           const FunctionConstants& constants) const {
+NS::SharedPtr<MTL::Function> Library::create_specialized(const std::string& name,
+                                                         const FunctionConstants& constants) const {
     AutoreleaseScope scope;
     NS::String* fn_name = NS::String::string(name.c_str(), NS::UTF8StringEncoding);
 
-    MTL::Function* probe = library_->newFunction(fn_name);
+    NS::SharedPtr<MTL::Function> probe = NS::TransferPtr(library_->newFunction(fn_name));
     if (!probe) {
         if (!has_function(name)) {
             throw MSLFunctionNotFoundError("no such MSL function: " + name);
@@ -279,7 +277,7 @@ MTL::Function* Library::create_specialized(const std::string& name,
         throw MSLCompileError("MSL function '" + name +
                               "' exists but could not be created for constants reflection");
     }
-    std::map<std::string, DeclaredConstant> declared = read_declared(probe);
+    std::map<std::string, DeclaredConstant> declared = read_declared(probe.get());
 
     // No constants declared, none provided: the probe *is* the function.
     if (declared.empty() && constants.empty()) return probe;
@@ -305,7 +303,6 @@ MTL::Function* Library::create_specialized(const std::string& name,
         }
     }
     if (!missing.empty() || !unknown.empty()) {
-        probe->release();
         std::string message;
         if (!missing.empty()) {
             message += "MSL function '" + name + "' requires function constant(s) " + missing +
@@ -317,7 +314,6 @@ MTL::Function* Library::create_specialized(const std::string& name,
         }
         throw MSLCompileError(message);
     }
-    probe->release();
 
     FunctionConstants coerced;
     coerced.reserve(constants.size());
@@ -333,7 +329,8 @@ MTL::Function* Library::create_specialized(const std::string& name,
                                  NS::String::string(c.name.c_str(), NS::UTF8StringEncoding));
     }
     NS::Error* error = nullptr;
-    MTL::Function* fn = library_->newFunction(fn_name, values, &error);
+    NS::SharedPtr<MTL::Function> fn =
+        NS::TransferPtr(library_->newFunction(fn_name, values, &error));
     if (!fn) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
         throw MSLCompileError("failed to specialize MSL function '" + name +
@@ -350,8 +347,8 @@ std::shared_ptr<ComputePipeline> Library::pipeline_for(const std::string& name,
         if (auto hit = pipelines_.find(key)) return hit;
     }
     // Built outside the lock; a racing build of the same key is dropped.
-    MTL::Function* fn = create_specialized(name, constants);
-    auto pipeline = std::make_shared<ComputePipeline>(device_, fn, name);
+    NS::SharedPtr<MTL::Function> fn = create_specialized(name, constants);
+    auto pipeline = std::make_shared<ComputePipeline>(device_, fn.get(), name);
     std::lock_guard<std::mutex> lock(mutex_);
     return pipelines_.insert(key, std::move(pipeline));
 }

@@ -41,9 +41,8 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
 
     // Binding reflection backs the host-side launch validation in add().
     MTL::ComputePipelineReflection* reflection = nullptr;
-    pipeline_ = device->newComputePipelineState(function, MTL::PipelineOptionBindingInfo,
-                                                &reflection, &error);
-    function->release();
+    pipeline_ = NS::TransferPtr(device->newComputePipelineState(
+        function, MTL::PipelineOptionBindingInfo, &reflection, &error));
     if (!pipeline_) {
         std::string message = error ? error->localizedDescription()->utf8String() : "unknown error";
         throw PipelineBuildError("failed to build compute pipeline: " + message);
@@ -67,9 +66,7 @@ ComputePipeline::ComputePipeline(MTL::Device* device, MTL::Function* function,
     }
 }
 
-ComputePipeline::~ComputePipeline() {
-    if (pipeline_) pipeline_->release();
-}
+ComputePipeline::~ComputePipeline() = default;
 
 void ComputePipeline::validate_shape(size_t binding_count,
                                      const std::vector<size_t>& threadgroup_memory, Dim3 tg,
@@ -178,26 +175,21 @@ CommandBatch::CommandBatch(MetalRuntime& rt, bool concurrent)
     MTL::CommandQueue* queue = rt.queue();
 
     // Both come back autoreleased and the batch outlives this pool, so retain.
-    command_buffer_ = queue->commandBuffer();
+    command_buffer_ = NS::RetainPtr(queue->commandBuffer());
     if (!command_buffer_) {
         throw DispatchError("could not create a Metal command buffer");
     }
-    command_buffer_->retain();
-    encoder_ = concurrent ? command_buffer_->computeCommandEncoder(MTL::DispatchTypeConcurrent)
-                          : command_buffer_->computeCommandEncoder();
+    encoder_ = NS::RetainPtr(
+        concurrent ? command_buffer_->computeCommandEncoder(MTL::DispatchTypeConcurrent)
+                   : command_buffer_->computeCommandEncoder());
     if (!encoder_) {
-        command_buffer_->release();
-        command_buffer_ = nullptr;
         throw DispatchError("could not create a Metal compute command encoder");
     }
-    encoder_->retain();
 }
 
 CommandBatch::~CommandBatch() {
     // Metal requires an open encoder to be ended before its command buffer is released.
     if (!committed_ && encoder_) encoder_->endEncoding();
-    if (encoder_) encoder_->release();
-    if (command_buffer_) command_buffer_->release();
 }
 
 void CommandBatch::add(const Launch& launch) {

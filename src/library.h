@@ -11,6 +11,7 @@
 #include "dtype.h"
 #include "export.h"
 #include "lru.h"
+#include "ns_ptr.h"
 
 namespace MTL {
 class Device;
@@ -75,12 +76,12 @@ class MR_API Library {
    private:
     bool has_function(const std::string& name) const;
 
-    // Validates `constants` against reflection, then specializes. Caller owns the result.
-    MTL::Function* create_specialized(const std::string& name,
-                                      const FunctionConstants& constants) const;
+    // Validates `constants` against reflection, then specializes.
+    NS::SharedPtr<MTL::Function> create_specialized(const std::string& name,
+                                                    const FunctionConstants& constants) const;
 
     MTL::Device* device_ = nullptr;  // borrowed
-    MTL::Library* library_ = nullptr;
+    NS::SharedPtr<MTL::Library> library_;
 
     static constexpr size_t kMaxCachedPipelines = 128;
     std::mutex mutex_;
